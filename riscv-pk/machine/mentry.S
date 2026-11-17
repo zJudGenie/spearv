@@ -4,130 +4,37 @@
 #include "bits.h"
 #include "config.h"
 
-/*
-  .data
-  .align 6
-interrupt_table:
-  .dc.a interrupt_trap           //  0 User software interrupt
-  .dc.a interrupt_trap           //  1 Supervisor software interrupt
-  .dc.a interrupt_trap           //  2 Reserved
-  .dc.a interrupt_trap           //  3 Machine software interrupt
-  .dc.a interrupt_trap           //  4 User timer interrupt
-  .dc.a interrupt_trap           //  5 Supervisor timer interrupt
-  .dc.a interrupt_trap           //  6 Reserved
-  .dc.a interrupt_trap           //  7 Machine timer interrupt
-  .dc.a interrupt_trap           //  8 User external interrupt
-  .dc.a interrupt_trap           //  9 Supervisor external interrupt
-  .dc.a interrupt_trap           // 10 Reserved
-  .dc.a interrupt_trap           // 11 Machine external interrupt
-*/
-
-
-.globl trap_vector
-.globl trap_vector_enclave
-
   .data
   .align 6
 trap_table:
 #define BAD_TRAP_VECTOR 0
-  .dc.a bad_trap                 //  0 Instruction address misaligned
-  .dc.a pmp_trap                 //  1 Instruction access fault
-  .dc.a illegal_insn_trap        //  2 illegal instruction
-  .dc.a bad_trap                 //  3 breakpoint
-  .dc.a misaligned_load_trap     //  4 Load address misaligned
-  .dc.a pmp_trap                 //  5 Load access fault
-  .dc.a misaligned_store_trap    //  6 Store/AMO address misaligned
-  .dc.a pmp_trap                 //  7 Store/AMO access fault
-  .dc.a bad_trap                 //  8 Environment call from U-mode
-  .dc.a mcall_trap               //  9 Environment call from S-mode
-  .dc.a bad_trap                 // 10 Reserved
+  .dc.a bad_trap
+  .dc.a pmp_trap
+  .dc.a illegal_insn_trap
+  .dc.a bad_trap
+  .dc.a misaligned_load_trap
+  .dc.a pmp_trap
+  .dc.a misaligned_store_trap
+  .dc.a pmp_trap
+  .dc.a bad_trap
+  .dc.a mcall_trap
+  .dc.a bad_trap
 #ifdef BBL_BOOT_MACHINE
-  .dc.a mcall_trap               // 11 Environment call from M-mode
+  .dc.a mcall_trap
 #else
-  .dc.a bad_trap                 // 11 Environment call from M-mode
+  .dc.a bad_trap
 #endif /* BBL_BOOT_MACHINE */
-  .dc.a bad_trap                 // 12 Instruction page fault
+  .dc.a bad_trap
 #define TRAP_FROM_MACHINE_MODE_VECTOR 13
-  .dc.a __trap_from_machine_mode // 13 Load page fault
-  .dc.a bad_trap                 // 14 Reserved
-  .dc.a bad_trap                 // 15 Store/AMO page fault
-  .dc.a bad_trap                 // 16 Reserved
-  .dc.a bad_trap                 // 17 Reserved
-  .dc.a bad_trap                 // 18 Reserved
-  .dc.a bad_trap                 // 19 Reserved
-  .dc.a bad_trap                 // 20 Reserved
-  .dc.a bad_trap                 // 21 Reserved
-  .dc.a bad_trap                 // 22 Reserved
-  .dc.a bad_trap                 // 23 Reserved
-  .dc.a bad_trap                 // 24 Reserved
-  .dc.a mpkey_mismatch_trap      // 25 MPKEY mismatch
-  .dc.a enclave_access_trap      // 26 EAM mismatch
-  .dc.a bad_trap                 // 27 MEID  mismatch
-  .dc.a enc_integrity_trap       // 28 Enclave integrity violated
-  .dc.a satp_mode_change_trap    // 29 S-Mode tried disabeling VM
-  .dc.a bad_trap                 // 30 Reserved
-  .dc.a hpce_trap                // 31 huge page containing enclave fault
+  .dc.a __trap_from_machine_mode
+  .dc.a bad_trap
+  .dc.a bad_trap
+
   .option norvc
   .section .text.init,"ax",@progbits
   .globl reset_vector
 reset_vector:
   j do_reset
-
-//------------------------------------------------------------------------------
-trap_vector_enclave:
-  csrrw sp, mscratch, sp
-  beqz sp, .Ltrap_from_machine_mode
-
-  STORE a0, 10*REGBYTES(sp)
-  STORE a1, 11*REGBYTES(sp)
-
-  csrr a1, mcause
-  bgez a1, .Lhandle_trap_in_machine_mode
-
-  # This is an interrupt.
-
-  # Preserve the registers.  Compute the address of the trap handler.
-  STORE ra, 1*REGBYTES(sp)
-  STORE gp, 3*REGBYTES(sp)
-  STORE tp, 4*REGBYTES(sp)
-  STORE t0, 5*REGBYTES(sp)
-  STORE t1, 6*REGBYTES(sp)
-  STORE t2, 7*REGBYTES(sp)
-  STORE s0, 8*REGBYTES(sp)
-  STORE s1, 9*REGBYTES(sp)
-  STORE a2,12*REGBYTES(sp)
-  STORE a3,13*REGBYTES(sp)
-  csrrw t0, mscratch, x0           # t0 <- user sp
-  STORE a4,14*REGBYTES(sp)
-  STORE a5,15*REGBYTES(sp)
-  STORE a6,16*REGBYTES(sp)
-  STORE a7,17*REGBYTES(sp)
-  STORE s2,18*REGBYTES(sp)
-  STORE s3,19*REGBYTES(sp)
-  STORE s4,20*REGBYTES(sp)
-  STORE s5,21*REGBYTES(sp)
-  STORE s6,22*REGBYTES(sp)
-  STORE s7,23*REGBYTES(sp)
-  STORE s8,24*REGBYTES(sp)
-  STORE s9,25*REGBYTES(sp)
-  STORE s10,26*REGBYTES(sp)
-  STORE s11,27*REGBYTES(sp)
-  STORE t3,28*REGBYTES(sp)
-  STORE t4,29*REGBYTES(sp)
-  STORE t5,30*REGBYTES(sp)
-  STORE t6,31*REGBYTES(sp)
-  STORE t0, 2*REGBYTES(sp)         # sp
-  STORE x0, (sp) # Zero x0's save slot.
-
-  mv a0, sp
-  li a1, 0
-  call trap_vector_enclave_c
-  //li a0, 2
-  //STORE a0, 10*REGBYTES(sp)
-
-  j restore_mscratch
-//------------------------------------------------------------------------------
-
 
 trap_vector:
   csrrw sp, mscratch, sp
@@ -141,26 +48,6 @@ trap_vector:
 
   # This is an interrupt.  Discard the mcause MSB and decode the rest.
   sll a1, a1, 1
-/*
-  //handle enclave interrupts
-//#ifdef SM_INTERRUPT_HANDLING
-  //-----------------------
-  __trap_vector_enclave:
-  csrr a0, CSR_U_MEID
-  beqz a0, .Linterrupt_not_enclave // if MEID is zero, we are not in an enclave
-
-  li a0, IRQ_M_SOFT * 2 // IPI
-  beq a0, a1, .Linterrupt_not_enclave // skip if IPI
-
-  //li a0, IRQ_S_SOFT * 2
-  //bne a0, a1, .Linterrupt_not_enclave
-
-  srl a1, a1, 1 //shift back to original value
-  j .Lhandle_enclave_interrupt_in_machine_mode //a1 = mcause
-
-.Linterrupt_not_enclave:
-//#endif // SM_INTERRUPT_HANDLING
-*/
 
   # Is it a machine timer interrupt?
   li a0, IRQ_M_TIMER * 2
@@ -216,23 +103,7 @@ trap_vector:
 1:
   j .Lmret
 
-/*
-.Lhandle_enclave_interrupt_in_machine_mode:
-  # Preserve the registers.  Compute the address of the trap handler.
-  STORE ra, 1*REGBYTES(sp)
-  STORE gp, 3*REGBYTES(sp)
-  STORE tp, 4*REGBYTES(sp)
-  STORE t0, 5*REGBYTES(sp)
-1:auipc t0, %pcrel_hi(interrupt_table)  # t0 <- %hi(interrupt_table)
-  STORE t1, 6*REGBYTES(sp)
-  sll t1, a1, LOG_REGBYTES         # t1 <- mcause * ptr size
-  STORE t2, 7*REGBYTES(sp)
-  add t1, t0, t1                   # t1 <- %hi(trap_table)[mcause]
-  STORE s0, 8*REGBYTES(sp)
-  LOAD t1, %pcrel_lo(1b)(t1)       # t1 <- trap_table[mcause]
-  // the rest is the same as in Lhandle_trap_in_machine_mode
-  j .Lhandle_trap_in_machine_mode_after_loading_trap_table
-*/
+
 .Lhandle_trap_in_machine_mode:
   # Preserve the registers.  Compute the address of the trap handler.
   STORE ra, 1*REGBYTES(sp)
@@ -246,7 +117,6 @@ trap_vector:
   add t1, t0, t1                   # t1 <- %hi(trap_table)[mcause]
   STORE s0, 8*REGBYTES(sp)
   LOAD t1, %pcrel_lo(1b)(t1)       # t1 <- trap_table[mcause]
-.Lhandle_trap_in_machine_mode_after_loading_trap_table:
   STORE s1, 9*REGBYTES(sp)
   mv a0, sp                        # a0 <- regs
   STORE a2,12*REGBYTES(sp)

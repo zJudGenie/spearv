@@ -67,7 +67,6 @@ static void help(int exit_code = 1)
   fprintf(stderr, "  --dm-no-abstract-csr  Debug module won't support abstract to authenticate\n");
   fprintf(stderr, "  --dm-no-halt-groups   Debug module won't support halt groups\n");
   fprintf(stderr, "  --dm-no-impebreak     Debug module won't support implicit ebreak in program buffer\n");
-  fprintf(stderr, "  --log-level=<level>   Defines the log level from 0 (= no output) to 10 (Very Verbose)\n");
 
   exit(exit_code);
 }
@@ -151,8 +150,6 @@ static std::vector<std::pair<reg_t, mem_t*>> make_mems(const char* arg)
     return std::vector<std::pair<reg_t, mem_t*>>(1, std::make_pair(reg_t(DRAM_BASE), new mem_t(size)));
   }
 
-  assert(false && "not implemented. tag.cc uses DRAM_BASE instead of checking for the actual base.");
-
   // handle base/size tuples
   std::vector<std::pair<reg_t, mem_t*>> res;
   while (true) {
@@ -216,8 +213,6 @@ int main(int argc, char** argv)
   bool dtb_enabled = true;
   bool real_time_clint = false;
   size_t nprocs = 1;
-  size_t tag_width = 128;
-  size_t tag_granularity = 4096;
   const char* kernel = NULL;
   reg_t kernel_offset, kernel_size;
   size_t initrd_size;
@@ -367,12 +362,6 @@ int main(int argc, char** argv)
   parser.option(0, "log", 1,
                 [&](const char* s){log_path = s;});
 
-  //parser.option(0, "log-level", 1, [&](const char* s){debug_log_level = strtoull(s, 0, 0);});
-  parser.option(0, "tag-width", 1, [&](const char* s){tag_width = atoul_nonzero_safe(s);});
-  parser.option(0, "tag-granularity", 1, [&](const char* s){tag_granularity = atoul_nonzero_safe(s);});
-
-  parser.option(0, "log-level", 1, [&](const char* s){debug_log_level = strtoull(s, 0, 0);});
-
   auto argv1 = parser.parse(argv);
   std::vector<std::string> htif_args(argv1, (const char*const*)argv + argc);
   if (mems.empty())
@@ -409,7 +398,7 @@ int main(int argc, char** argv)
 
   sim_t s(isa, priv, varch, nprocs, halted, real_time_clint,
       initrd_start, initrd_end, bootargs, start_pc, mems, plugin_devices, htif_args,
-      std::move(hartids), dm_config, log_path, dtb_enabled, dtb_file, tag_width, tag_granularity);
+      std::move(hartids), dm_config, log_path, dtb_enabled, dtb_file);
   std::unique_ptr<remote_bitbang_t> remote_bitbang((remote_bitbang_t *) NULL);
   std::unique_ptr<jtag_dtm_t> jtag_dtm(
       new jtag_dtm_t(&s.debug_module, dmi_rti));

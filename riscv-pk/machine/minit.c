@@ -13,10 +13,9 @@
 #include "htif.h"
 #include <string.h>
 #include <limits.h>
-#include "tag.h"
 
 pte_t* root_page_table;
-uintptr_t mem_size_final, mem_size, mem_base;
+uintptr_t mem_size;
 volatile uint64_t* mtime;
 volatile uint32_t* plic_priorities;
 size_t plic_ndevs;
@@ -64,12 +63,7 @@ static void delegate_traps()
     (1U << CAUSE_BREAKPOINT) |
     (1U << CAUSE_LOAD_PAGE_FAULT) |
     (1U << CAUSE_STORE_PAGE_FAULT) |
-    (1U << CAUSE_USER_ECALL);/* |
-    (1U << CAUSE_MPKEY_MISMATCH_FAULT) |
-    (1U << CAUSE_ESMAP_MISMATCH_FAULT) |
-    (1U << CAUSE_MEID_MISMATCH_FAULT) |
-    (1U << CAUSE_ENC_INTEGRITY_FAULT) ;
-    */
+    (1U << CAUSE_USER_ECALL);
 
   write_csr(mideleg, interrupts);
   write_csr(medeleg, exceptions);
@@ -112,8 +106,6 @@ hls_t* hls_init(uintptr_t id)
 static void memory_init()
 {
   mem_size = mem_size / MEGAPAGE_SIZE * MEGAPAGE_SIZE;
-
-  tag_init(mem_base, mem_size, MTAG0, 0);
 }
 
 static void hart_init()
@@ -204,9 +196,6 @@ void init_first_hart(uintptr_t hartid, uintptr_t dtb)
   hart_plic_init();
   //prci_test();
   memory_init();
-  //TODO we may want to set the size in the FDT to be reduced by tag storage such that OS/PK wont use that memory
-  //also for the pk
-
   boot_loader(dtb);
 }
 

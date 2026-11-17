@@ -30,8 +30,7 @@ public:
         std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices,
         const std::vector<std::string>& args, const std::vector<int> hartids,
         const debug_module_config_t &dm_config, const char *log_path,
-        bool dtb_enabled, const char *dtb_file,
-        size_t tag_width, size_t tag_granularity);
+        bool dtb_enabled, const char *dtb_file);
   ~sim_t();
 
   // run the simulation to completion
@@ -118,7 +117,6 @@ private:
   void interactive_until(const std::string& cmd, const std::vector<std::string>& args, bool noisy);
   void interactive_until_silent(const std::string& cmd, const std::vector<std::string>& args);
   void interactive_until_noisy(const std::string& cmd, const std::vector<std::string>& args);
-  void interactive_debug_level(const std::string& cmd, const std::vector<std::string>& args);
   reg_t get_reg(const std::vector<std::string>& args);
   freg_t get_freg(const std::vector<std::string>& args);
   reg_t get_mem(const std::vector<std::string>& args);

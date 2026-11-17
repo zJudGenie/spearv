@@ -33,7 +33,6 @@ int do_munmap(uintptr_t addr, size_t length);
 uintptr_t do_mremap(uintptr_t addr, size_t old_size, size_t new_size, int flags);
 uintptr_t do_mprotect(uintptr_t addr, size_t length, int prot);
 uintptr_t do_brk(uintptr_t addr);
-pte_t * debug_pte(uintptr_t addr);
 
 #define kva2pa(va) ((uintptr_t)(va))
 #define is_uva(va) ((uintptr_t)(va) < MEM_START)

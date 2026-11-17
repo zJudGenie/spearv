@@ -6,14 +6,6 @@
 #include "config.h"
 #include "fdt.h"
 #include "mtrap.h"
-#include "tag.h"
-
-#define print_always(fmt_str, ...) do { printm(COLOR_MAGENTA "[FDT] " fmt_str COLOR_RESET, ##__VA_ARGS__); } while (0)
-#if defined(DEBUG_FDT) && DEBUG_FDT == 1
-#define print_debug print_always
-#else
-#define print_debug(fmt_str, ...) do {} while (0)
-#endif
 
 static inline uint32_t bswap(uint32_t x)
 {
@@ -101,7 +93,6 @@ static uint32_t *fdt_scan_helper(
 
 void fdt_scan(uintptr_t fdt, const struct fdt_cb *cb)
 {
-
   struct fdt_header *header = (struct fdt_header *)fdt;
 
   // Only process FDT that we understand
@@ -197,26 +188,10 @@ static void mem_done(const struct fdt_scan_node *node, void *extra)
     uint64_t base, size;
     value = fdt_get_address(node->parent, value, &base);
     value = fdt_get_size   (node->parent, value, &size);
-    if (base <= self && self <= base + size) {
-      //NOTE: proxykernel and tagging code uses these variables
-      mem_size = size;
-      mem_base = base;
-      mem_size_final = mem_size; //needed for pk-mmap (in case we dont run tag_init for some reason)
-    }
+    if (base <= self && self <= base + size) { mem_size = size; }
   }
   assert (end == value);
 }
-
-/*
-uint8_t isTaggingActive()
-{
-    uint64_t tag_mode = CSRR(CSR_U_TAG_MODE);
-    if (tag_mode != MTAG0)
-        return 1;
-    else
-        return 0;
-}
-*/
 
 void query_mem(uintptr_t fdt)
 {
@@ -233,119 +208,6 @@ void query_mem(uintptr_t fdt)
   fdt_scan(fdt, &cb);
   assert (mem_size > 0);
 }
-////////////////////////////////////////////////////////////////////////////////
-
-
-struct tagged_mem_scan {
-  int memory;
-  const uint32_t *reg_value;
-  int reg_len;
-  size_t count;
-};
-
-static void tagged_memory_open(const struct fdt_scan_node *node, void *extra)
-{
-  struct tagged_mem_scan *scan = (struct tagged_mem_scan *)extra;
-  size_t count = scan->count;
-  memset(scan, 0, sizeof(*scan));
-  scan->count = count;
-}
-
-static void tagged_memory_prop(const struct fdt_scan_prop *prop, void *extra)
-{
-  struct tagged_mem_scan *scan = (struct tagged_mem_scan *)extra;
-  if (!strcmp(prop->name, "device_type") && !strcmp((const char*)prop->value, "memory")) {
-    scan->memory = 1;
-    scan->count++;
-  } else if (!strcmp(prop->name, "reg")) {
-    scan->reg_value = prop->value;
-    scan->reg_len = prop->len;
-  }
-}
-
-static void tagged_memory_done(const struct fdt_scan_node *node, void *extra)
-{
-  struct tagged_mem_scan *scan = (struct tagged_mem_scan *)extra;
-  const uint32_t *value = scan->reg_value;
-  const uint32_t *end = value + scan->reg_len/4;
-  uintptr_t self = (uintptr_t)mem_done;
-
-  if (!scan->memory) return;
-  assert (scan->reg_value && scan->reg_len % 4 == 0);
-  print_debug("scan->reg_len =       0x%x\n", scan->reg_len);
-
-  assert (scan->count == 1); //TODO currently we dont suppoert more than 1 memory region
-
-  uint64_t base = 0;
-  uint64_t size = 0;
-  while (end - value > 0) {
-    value = fdt_get_address(node->parent, value, &base);
-    uint32_t * start_addr_of_size = (uint32_t *)value;
-    value = fdt_get_size(node->parent, value, &size);
-    print_debug("node->size_cells =    0x%x\n", node->parent->size_cells);
-    print_debug("node->address_cells = 0x%x\n", node->parent->address_cells);
-    //assert(node->parent->size_cells == 0); //TODO if this fails: need to do the opposite of fdt_get_size
-
-    uintptr_t self = (uintptr_t)tagged_memory_done;
-    if (base <= self && self <= base + size) {
-      //uint64_t reserved_size_for_tagstore = get_max_tagstorage_size(size);
-      uint64_t reserved_size_for_tagstore = get_max_tagstorage_size(size + base); // tagging entire address space from 0 to ram-end
-      uint64_t new_size = size - reserved_size_for_tagstore;
-      mem_size_final = new_size; // used by pk-mmap
-
-      print_debug("base =                0x%lx\n", base);
-      print_always("size =                0x%lx (%ld MB)\n", size, size / 1024 / 1024);
-      print_always("new_size =            0x%lx (%ld MB)\n", new_size, new_size / 1024 / 1024);
-      print_always("reserved for tagstore 0x%lx (%ld MB)\n", reserved_size_for_tagstore, reserved_size_for_tagstore / 1024 / 1024);
-
-      //*(uint32_t *)value = bswap(new_size); //this might work for 32-bit memory sizes. but it's wrong.
-
-      uint32_t *tmp_address = (uint32_t *)start_addr_of_size;
-      uint64_t tmp_size = new_size;
-      assert(node->parent->size_cells >= 1 && node->parent->size_cells <= 2); // "value" must be a 32 or 64bit integer (1 or 2 cells with size 4-bytes)
-      for (int cells = node->parent->size_cells; cells > 0; --cells){
-        uint32_t tmp = new_size >> (32 * (cells-1));
-        tmp_size >>= 32;
-        tmp = bswap(tmp);
-        print_debug("writing 0x%x (bswap = 0x%x) to 0x%x. Previous value = 0x%x (bswap = 0x%x)\n", tmp, bswap(tmp), tmp_address, *tmp_address, bswap(*tmp_address));
-        *tmp_address = tmp;
-        tmp_address++;
-      }
-
-      //read value again to make sure it is correct
-      uint64_t tmp2 = 0;
-      fdt_get_size(node->parent, start_addr_of_size, &tmp2);
-      assert(tmp2 == new_size);
-    }
-  }
-}
-
-void filter_tagged_memory(uintptr_t fdt){
-  //print_debug("filter_tagged_memory  0x%x\n", fdt);
-  #if defined(DEBUG_FDT_TREE) && DEBUG_FDT_TREE == 1
-    fdt_print(fdt);
-  #endif
-
-  struct fdt_cb cb;
-  struct tagged_mem_scan scan;
-  memset(&cb, 0, sizeof(cb));
-  memset(&scan, 0, sizeof(scan));
-  cb.open = tagged_memory_open;
-  cb.prop = tagged_memory_prop;
-  cb.done = tagged_memory_done;
-  cb.extra = &scan;
-  fdt_scan(fdt, &cb);
-
-  #if defined(DEBUG_FDT_TREE) && DEBUG_FDT_TREE == 1
-    print_debug("----------------------\n");
-    fdt_print(fdt);
-    print_debug("----------------------\n");
-  #endif
-}
-
-
-////////////////////////////////////////////////////////////////////////////////
-
 
 ///////////////////////////////////////////// HART SCAN //////////////////////////////////////////
 
@@ -839,8 +701,7 @@ void filter_harts(uintptr_t fdt, long *disabled_hart_mask)
 
 //////////////////////////////////////////// PRINT //////////////////////////////////////////////
 
-//#ifdef PK_PRINT_DEVICE_TREE
-#if 1
+#ifdef PK_PRINT_DEVICE_TREE
 #define FDT_PRINT_MAX_DEPTH 32
 
 struct fdt_print_info {

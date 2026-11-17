@@ -10,7 +10,6 @@
 #include "usermem.h"
 #include <string.h>
 #include <errno.h>
-#include "mcall.h"
 
 typedef long (*syscall_t)(long, long, long, long, long, long, long);
 
@@ -475,39 +474,6 @@ int sys_rt_sigaction(int sig, const void* act, void* oact, size_t sssz)
   return 0;
 }
 
-long timer_period = 0;
-long _sys_set_timer(long time, long period)
-{
-  long current_time = rdtime64();
-  assert(time == 0 || period == 0);
-  //printk("_sys_set_timer(%lld)\n", time);
-  if(period){
-    timer_period = period;
-    time = current_time + period;
-  }
-
-  printk("[PK] current time is       %d\n", current_time);
-  printk("[PK] setting next timer to %d\n", time);
-
-  asm volatile(""
-    "add a0, zero, %1;"
-    "li a7, %0;"
-    "ecall;"
-    : : "i"(SBI_SET_TIMER), "r"(time)
-  );
-  return 0;
-}
-
-//long _sys_rdcycle()
-//{
-//  return rdcycle64();
-//}
-//
-//long _sys_rdtime()
-//{
-//  return rdtime64();
-//}
-
 long sys_time(long* loc)
 {
   long t = (long)(rdcycle64() / CLOCK_FREQ);
@@ -525,7 +491,7 @@ int sys_times(long* loc)
   kloc[0] = t / (CLOCK_FREQ / 1000000);
 
   memcpy_to_user(loc, kloc, sizeof(kloc));
-
+  
   return 0;
 }
 
@@ -594,40 +560,6 @@ static int sys_stub_nosys()
   return -ENOSYS;
 }
 
-int _sys_debug(long a0, long a1, long a2, long a3, long a4, long a5, unsigned long n)
-{
-  printk("_sys_debug a0 = %lld\n", a0);
-  switch (a0)
-  {
-  case 0x42:
-    printk("disabling virtual memory\n");
-    write_csr(satp, 0 | INSERT_FIELD(0, SATP64_MODE, SATP_MODE_OFF));
-    assert(0);
-    break;
-  default:
-    break;
-  }
-  return 0;
-}
-
-int _sys_debug_pte(uintptr_t addr, pte_t* user_buffer, long write)
-{
-  pte_t * pte_ptr = debug_pte(addr);
-  if(!pte_ptr){
-    return -1;
-  }
-
-  if(!write){
-    //*user_buffer = *pte_ptr;
-    memcpy_to_user(user_buffer, pte_ptr, sizeof(pte_t));
-  }else{
-    //*pte_ptr = *user_buffer;
-    memcpy_from_user(pte_ptr, user_buffer, sizeof(pte_t));
-  }
-
-  return 0;
-}
-
 long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, unsigned long n)
 {
   const static void* syscall_table[] = {
@@ -679,13 +611,6 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, unsigned l
     [SYS_set_tid_address] = sys_stub_nosys,
     [SYS_set_robust_list] = sys_stub_nosys,
     [SYS_madvise] = sys_stub_nosys,
-
-    [SYS_set_timer] = _sys_set_timer,
-    //[SYS_rdcycle] = _sys_rdcycle,
-    //[SYS_rdtime] = _sys_rdtime,
-    [SYS_debug_pte] = _sys_debug_pte,
-    [SYS_debug] = _sys_debug,
-
   };
 
   const static void* old_syscall_table[] = {

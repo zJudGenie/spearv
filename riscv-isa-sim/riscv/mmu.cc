@@ -4,9 +4,8 @@
 #include "arith.h"
 #include "simif.h"
 #include "processor.h"
-#include "tag.h"
 
-mmu_t::mmu_t(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granularity)
+mmu_t::mmu_t(simif_t* sim, processor_t* proc)
  : sim(sim), proc(proc),
 #ifdef RISCV_ENABLE_DUAL_ENDIAN
   target_big_endian(false),
@@ -17,13 +16,11 @@ mmu_t::mmu_t(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granu
   matched_trigger(NULL)
 {
   flush_tlb();
-  tagging_ = new tagging(sim, proc, tag_width, tag_granularity);
   yield_load_reservation();
 }
 
 mmu_t::~mmu_t()
 {
-  delete tagging_;
 }
 
 void mmu_t::flush_icache()
@@ -53,7 +50,6 @@ static void throw_access_exception(bool virt, reg_t addr, access_type type)
 
 reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_flags)
 {
-  //INFO("[SPIKE] MMU translate start\n");
   if (!proc)
     return addr;
 
@@ -63,7 +59,7 @@ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_f
   if (type != FETCH) {
     if (!proc->state.debug_mode && get_field(proc->state.mstatus, MSTATUS_MPRV)) {
       mode = get_field(proc->state.mstatus, MSTATUS_MPP);
-      if (get_field(proc->state.mstatus, MSTATUS_MPV))
+      if (get_field(proc->state.mstatus, MSTATUS_MPV) && mode != PRV_M)
         virt = true;
     }
     if (!proc->state.debug_mode && (xlate_flags & RISCV_XLATE_VIRT)) {
@@ -75,16 +71,9 @@ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_f
     }
   }
 
-  reg_t pte;
-  reg_t pte_level;
-  reg_t paddr = walk(addr, type, mode, virt, mxr, &pte, &pte_level) | (addr & (PGSIZE-1));
-  //INFO("storage base: %lx\n", proc->state.tag_storage_base);
-  if (proc->state.tag_storage_base)
-    tag_check(virt, addr, paddr, pte, pte_level, len, type, mode); //throws exception
-
+  reg_t paddr = walk(addr, type, mode, virt, mxr) | (addr & (PGSIZE-1));
   if (!pmp_ok(paddr, len, type, mode))
     throw_access_exception(virt, addr, type);
-  //INFO("[SPIKE] MMU translate end\n");
   return paddr;
 }
 
@@ -223,12 +212,6 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
   tlb_entry_t entry = {host_addr - vaddr, paddr - vaddr};
   tlb_data[idx] = entry;
   return entry;
-}
-
-void mmu_t::tag_check(bool virt, reg_t addr, reg_t physical_addr, reg_t pte, reg_t pte_level, reg_t len, access_type type, reg_t mode)
-{
-  tagging_->tagcheck(virt, addr, physical_addr, pte, pte_level, len, type, mode);
-  return;
 }
 
 reg_t mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode)
@@ -391,7 +374,7 @@ reg_t mmu_t::s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_ty
   }
 }
 
-reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr, reg_t* leaf_pte, reg_t * pte_level)
+reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr)
 {
   reg_t page_mask = (reg_t(1) << PGSHIFT) - 1;
   reg_t satp = (virt) ? proc->get_state()->vsatp : proc->get_state()->satp;
@@ -422,7 +405,6 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr,
 
     reg_t pte = vm.ptesize == 4 ? from_target(*(target_endian<uint32_t>*)ppte) : from_target(*(target_endian<uint64_t>*)ppte);
     reg_t ppn = (pte & ~reg_t(PTE_N)) >> PTE_PPN_SHIFT;
-    //INFO("WALK: ppn = %x\n", ppn);
 
     if (PTE_TABLE(pte)) { // next level of page table
       base = ppn << PGSHIFT;
@@ -461,8 +443,6 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr,
                         | (vpn & ((reg_t(1) << napot_bits) - 1))
                         | (vpn & ((reg_t(1) << ptshift) - 1))) << PGSHIFT;
       reg_t phys = page_base | (addr & page_mask);
-      *leaf_pte = pte;
-      *pte_level = i;
       return s2xlate(addr, phys, type, type, virt, mxr) & ~page_mask;
     }
   }

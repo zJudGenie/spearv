@@ -120,13 +120,6 @@ causes = [
   (0x15, 'load guest page fault'),
   (0x16, 'virtual instruction'),
   (0x17, 'store guest page fault'),
-  (0x19, 'mpkey mismatch fault'),
-  (0x1a, 'enclave access fault'),
-  (0x1b, 'meid mismatch fault'),
-  (0x1c, 'enc integrity fault'),
-  (0x1d, 'satp mode change'),
-  (0x1e, 'st imm fault'),
-  (0x1f, 'hpce fault'),
 ]
 
 csrs = [
@@ -146,25 +139,6 @@ csrs = [
   (0x042, 'ucause'),
   (0x043, 'utval'),
   (0x044, 'uip'),
-
-  # memory tagging
-  # (0x061, 'u_tag_addr'),
-  # (0x062, 'u_tag_value_l'),
-  # (0x063, 'u_tag_value_h'),
-  # (0x064, 'u_tag_value_el'),
-  # (0x065, 'u_tag_value_eh'),
-  
-  (0x066, 'u_tag_size'),
-  (0x067, 'u_tag_mode'),
-  (0x068, 'u_tag_storage_base'),
-  (0x069, 'u_mpkey_config'),
-  (0x070, 'u_eam'),
-  (0x071, 'u_meid'),
-  (0x072, 'u_tlb_size'),
-  (0x073, 'u_emp'),
-  (0x074, 'u_tcs'),
-  (0x075, 'u_tag_control'),
-  (0x076, 'u_tag_dram_base'),
 
   # Standard User RO
   (0xC00, 'cycle'),
@@ -374,16 +348,6 @@ csrs = [
   (0xF14, 'mhartid'),
   (0xF15, 'mentropy'), # crypto ext
   (0x7A9, 'mnoise'),
-
-
-  # custom
-  # see Table 2.1:  Allocation of RISC-V CSR address ranges.
-  #  S R/W non-standard: 0x5C0-0x5FF
-  #  M R/W non-standard: 0x7c0-0x7ff
-  #  U R/W non-standard: 0x800-0x8FF
-  # 
-  # TODO
-
 ]
 
 csrs32 = [

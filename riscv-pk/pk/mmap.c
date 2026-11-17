@@ -374,9 +374,8 @@ uintptr_t do_mprotect(uintptr_t addr, size_t length, int prot)
         vmr_t* v = (vmr_t*)*pte;
         if((v->prot ^ prot) & ~v->prot){
           //TODO:look at file to find perms
-          //printm("TODO if((v->prot ^ prot) & ~v->prot){\n");
-          //res = -EACCES;
-          //break;
+          res = -EACCES;
+          break;
         }
         v->prot = prot;
       } else {
@@ -385,9 +384,8 @@ uintptr_t do_mprotect(uintptr_t addr, size_t length, int prot)
             ((prot & PROT_WRITE) && !(*pte & PTE_W)) ||
             ((prot & PROT_EXEC) && !(*pte & PTE_X))) {
           //TODO:look at file to find perms
-          //printm("TODO:look at file to find perms 2\n");
-          //res = -EACCES;
-          //break;
+          res = -EACCES;
+          break;
         }
         *pte = pte_create(pte_ppn(*pte), prot_to_type(prot, 1));
       }
@@ -407,12 +405,6 @@ void __map_kernel_range(uintptr_t vaddr, uintptr_t paddr, size_t len, int prot)
     size_t megapage_size = RISCV_PGSIZE << RISCV_PGLEVEL_BITS;
     int level = (vaddr | paddr) % megapage_size == 0 && len >= megapage_size;
     size_t pgsize = RISCV_PGSIZE << (level * RISCV_PGLEVEL_BITS);
-
-    #if 0
-    //disable huge pages
-    pgsize = RISCV_PGSIZE;
-    level = 0;
-    #endif
 
     pte_t* pte = __walk_internal(vaddr, 1, level);
     kassert(pte);
@@ -440,19 +432,19 @@ uintptr_t pk_vm_init()
 {
   extern char _end;
   first_free_page = ROUNDUP((uintptr_t)&_end, RISCV_PGSIZE);
-  free_pages = (mem_size_final - (first_free_page - MEM_START)) / RISCV_PGSIZE;
+  free_pages = (mem_size - (first_free_page - MEM_START)) / RISCV_PGSIZE;
 
-  size_t num_freelist_nodes = mem_size_final / RISCV_PGSIZE;
+  size_t num_freelist_nodes = mem_size / RISCV_PGSIZE;
   size_t freelist_node_array_size = ROUNDUP(num_freelist_nodes * sizeof(struct freelist_node_t), RISCV_PGSIZE);
   freelist_node_array = (struct freelist_node_t*)first_free_page;
   next_free_page = freelist_node_array_size / RISCV_PGSIZE;
 
   root_page_table = (void*)__page_alloc();
-  __map_kernel_range(MEM_START, MEM_START, mem_size_final, PROT_READ|PROT_WRITE|PROT_EXEC);
+  __map_kernel_range(MEM_START, MEM_START, mem_size, PROT_READ|PROT_WRITE|PROT_EXEC);
 
   current.mmap_max = current.brk_max = MEM_START;
 
-  size_t mem_pages = mem_size_final >> RISCV_PGSHIFT;
+  size_t mem_pages = mem_size >> RISCV_PGSHIFT;
   size_t stack_size = MIN(mem_pages >> 5, 2048) * RISCV_PGSIZE;
   size_t stack_bottom = __do_mmap(current.mmap_max - stack_size, stack_size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, 0, 0);
   kassert(stack_bottom != (uintptr_t)-1);
@@ -464,25 +456,3 @@ uintptr_t pk_vm_init()
   uintptr_t kernel_stack_top = __page_alloc() + RISCV_PGSIZE;
   return kernel_stack_top;
 }
-
-
-pte_t * debug_pte(uintptr_t addr)
-{
-  pte_t* pte_ptr = __walk(addr);
-
-  if (!pte_ptr || !(*pte_ptr & PTE_V)) {
-    //pte not present or it is still a vmr_t
-    if(handle_page_fault(addr, PROT_READ) != 0){
-      return NULL;
-    }
-  }
-  pte_ptr = __walk(addr);
-
-  if (!pte_ptr || !(*pte_ptr & PTE_V)) {
-    //printm("PTE not present\n");
-    return NULL;
-  }
-
-  return pte_ptr;
-}
-

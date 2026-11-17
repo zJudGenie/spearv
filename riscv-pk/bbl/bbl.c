@@ -41,8 +41,6 @@ static void filter_dtb(uintptr_t source)
   uint32_t size = fdt_size(source);
   memcpy((void*)dest, (void*)source, size);
 
-  filter_tagged_memory(dest);
-
 #ifndef CUSTOM_DTS
   // Remove information from the chained FDT
   filter_harts(dest, &disabled_hart_mask);

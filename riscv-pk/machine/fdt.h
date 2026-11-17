@@ -63,13 +63,11 @@ void query_harts(uintptr_t fdt);
 void query_plic(uintptr_t fdt);
 void query_clint(uintptr_t fdt);
 void query_chosen(uintptr_t fdt);
-//uint8_t isTaggingActive();
 
 // Remove information from FDT
 void filter_harts(uintptr_t fdt, long *disabled_hart_mask);
 void filter_plic(uintptr_t fdt);
 void filter_compat(uintptr_t fdt, const char *compat);
-void filter_tagged_memory(uintptr_t fdt);
 
 // The hartids of available harts
 extern uint64_t hart_mask;
@@ -80,8 +78,7 @@ extern void* kernel_end;
 
 #ifdef PK_PRINT_DEVICE_TREE
 // Prints the device tree to the console as a DTS
-//void fdt_print(uintptr_t fdt);
-#endif
 void fdt_print(uintptr_t fdt);
+#endif
 
 #endif

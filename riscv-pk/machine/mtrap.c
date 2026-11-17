@@ -1,4 +1,4 @@
-// Se LICENSE for license details.
+// See LICENSE for license details.
 
 #include "mtrap.h"
 #include "mcall.h"
@@ -16,63 +16,10 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include "tag.h"
 
 void __attribute__((noreturn)) bad_trap(uintptr_t* regs, uintptr_t dummy, uintptr_t mepc)
 {
-
-  printm("machine mode: unhandlable trap:\n");
-
-  sm_thread_regs_t * reg_state = (sm_thread_regs_t *)(regs+1);
-  printm("ra  = %lx ", reg_state->ra);
-  printm("sp  = %lx ", reg_state->sp);
-  printm("gp  = %lx ", reg_state->gp);
-  printm("tp  = %lx ", reg_state->tp);
-  printm("\n");
-  printm("t0  = %lx ", reg_state->t0);
-  printm("t1  = %lx ", reg_state->t1);
-  printm("t2  = %lx ", reg_state->t2);
-  printm("s0  = %lx ", reg_state->s0);
-  printm("\n");
-  printm("s1  = %lx ", reg_state->s1);
-  printm("a0  = %lx ", reg_state->a0);
-  printm("a1  = %lx ", reg_state->a1);
-  printm("a2  = %lx ", reg_state->a2);
-  printm("\n");
-  printm("a3  = %lx ", reg_state->a3);
-  printm("a4  = %lx ", reg_state->a4);
-  printm("a5  = %lx ", reg_state->a5);
-  printm("a6  = %lx ", reg_state->a6);
-  printm("\n");
-  printm("a7  = %lx ", reg_state->a7);
-  printm("s2  = %lx ", reg_state->s2);
-  printm("s3  = %lx ", reg_state->s3);
-  printm("s4  = %lx ", reg_state->s4);
-  printm("\n");
-  printm("s5  = %lx ", reg_state->s5);
-  printm("s6  = %lx ", reg_state->s6);
-  printm("s7  = %lx ", reg_state->s7);
-  printm("s8  = %lx ", reg_state->s8);
-  printm("\n");
-  printm("s9  = %lx ", reg_state->s9);
-  printm("s10 = %lx ", reg_state->s10);
-  printm("s11 = %lx ", reg_state->s11);
-  printm("t3  = %lx ", reg_state->t3);
-  printm("\n");
-  printm("t4  = %lx ", reg_state->t4);
-  printm("t5  = %lx ", reg_state->t5);
-  printm("t6  = %lx ", reg_state->t6);
-  printm("\n");
-
-  printm("mepc = 0x%16lx\n", read_csr(mepc));
-  printm("sepc = 0x%16lx\n", read_csr(sepc));
-
-  printm("cause = %d, %s\n", read_csr(mcause), _exception_cause_to_str(read_csr(mcause)));
-  printm("mtval = 0x%lx\n", read_csr(mtval));
-  printm("pc    = 0x%lx\n", mepc);
-
-  //die("machine mode: unhandlable trap %d @ %p", read_csr(mcause), mepc);
-  die("");
+  die("machine mode: unhandlable trap %d @ %p", read_csr(mcause), mepc);
 }
 
 static uintptr_t mcall_console_putchar(uint8_t ch)
@@ -293,51 +240,6 @@ void trap_from_machine_mode(uintptr_t* regs, uintptr_t dummy, uintptr_t mepc)
     default:
       bad_trap(regs, dummy, mepc);
   }
-}
-
-void mpkey_mismatch_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
-{
-    write_csr(mepc, mepc + 4);
-    printm("MPKEY MISMATCH!\n");
-    bad_trap(regs, mcause, mepc);
-    die("");
-    return;
-}
-/*
-void esmap_mismatch_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
-{
-    write_csr(mepc, mepc + 4);
-    printm("ESMAP MISMATCH!\n");
-    bad_trap(regs, mcause, mepc);
-    die("");
-    return;
-}
-void meid_mismatch_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
-{
-    write_csr(mepc, mepc + 4);
-    printm("MEID MISMATCH!\n");
-    bad_trap(regs, mcause, mepc);
-    die("");
-    return;
-}
-*/
-
-void enc_integrity_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
-{
-    write_csr(mepc, mepc + 4);
-    printm("ENCLAVE INTEGRITY FAULT!\n");
-    bad_trap(regs, mcause, mepc);
-    die("");
-    return;
-}
-
-void satp_mode_change_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
-{
-    write_csr(mepc, mepc + 4);
-    printm("SATP MODE CHANGE!\n");
-    bad_trap(regs, mcause, mepc);
-    die("");
-    return;
 }
 
 void poweroff(uint16_t code)

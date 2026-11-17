@@ -6,8 +6,6 @@
 # build under the source directory and still have it appear clean to git.
 
 build/
-build_debug
-build_release
 autom4te.cache/
 *.swp
 *~

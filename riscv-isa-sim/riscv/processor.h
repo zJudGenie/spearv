@@ -14,6 +14,7 @@
 #include "debug_rom_defines.h"
 #include "entropy_source.h"
 
+
 class processor_t;
 class mmu_t;
 typedef reg_t (*insn_func_t)(processor_t*, insn_t, reg_t);
@@ -99,14 +100,6 @@ enum VRM{
   ROD,
   INVALID_RM
 };
-
-typedef enum
-{
-  TAG_ACC_L = 0,
-  TAG_ACC_H,
-  TAG_ACC_EL,
-  TAG_ACC_EH
-} mtag_access;
 
 template<uint64_t N>
 struct type_usew_t;
@@ -222,20 +215,6 @@ struct state_t
   reg_t tdata2[num_triggers];
   bool debug_mode;
 
-  // address csrs for memory tagging
-  reg_t tag_addr;
-  reg_t tag_storage_base;
-  reg_t tag_dram_base;
-  reg_t tag_mode;
-  reg_t mpk_config;
-
-  reg_t meid;
-  reg_t tcs;
-  reg_t eam;
-  reg_t emp;
-
-  reg_t tag_control;
-
   static const int max_pmp = 16;
   uint8_t pmpcfg[max_pmp];
   reg_t pmpaddr[max_pmp];
@@ -296,7 +275,7 @@ class processor_t : public abstract_device_t
 public:
   processor_t(const char* isa, const char* priv, const char* varch,
               simif_t* sim, uint32_t id, bool halt_on_reset,
-              FILE *log_file, size_t tag_width, size_t tag_granularity);
+              FILE *log_file);
   ~processor_t();
 
   void set_debug(bool value);
