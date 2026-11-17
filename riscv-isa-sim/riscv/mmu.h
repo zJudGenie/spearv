@@ -13,6 +13,9 @@
 #include "byteorder.h"
 #include <stdlib.h>
 #include <vector>
+#include "tag.h"
+
+//class tagging;
 
 // virtual memory configuration
 #define PGSHIFT 12
@@ -58,7 +61,7 @@ private:
   std::map<reg_t, reg_t> alloc_cache;
   std::vector<std::pair<reg_t, reg_t >> addr_tbl;
 public:
-  mmu_t(simif_t* sim, processor_t* proc);
+  mmu_t(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granularity);
   ~mmu_t();
 
   inline reg_t misaligned_load(reg_t addr, size_t size)
@@ -351,6 +354,8 @@ public:
 
   void register_memtracer(memtracer_t*);
 
+  tagging* get_tagging() { return tagging_; }
+
   int is_dirty_enabled()
   {
 #ifdef RISCV_ENABLE_DIRTY
@@ -396,6 +401,7 @@ public:
 private:
   simif_t* sim;
   processor_t* proc;
+  tagging* tagging_;
   memtracer_list_t tracer;
   reg_t load_reservation_address;
   uint16_t fetch_temp;
@@ -421,7 +427,7 @@ private:
   reg_t s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_type, bool virt, bool mxr);
 
   // perform a page table walk for a given VA; set referenced/dirty bits
-  reg_t walk(reg_t addr, access_type type, reg_t prv, bool virt, bool mxr);
+  reg_t walk(reg_t addr, access_type type, reg_t prv, bool virt, bool mxr, reg_t* pte, reg_t * pte_level);
 
   // handle uncommon cases: TLB misses, page faults, MMIO
   tlb_entry_t fetch_slow_path(reg_t addr);
@@ -474,6 +480,7 @@ private:
 
   reg_t pmp_homogeneous(reg_t addr, reg_t len);
   reg_t pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode);
+  void tag_check(bool virt, reg_t addr, reg_t physical_addr, reg_t pte, reg_t pte_level, reg_t len, access_type type, reg_t mode);
 
 #ifdef RISCV_ENABLE_DUAL_ENDIAN
   bool target_big_endian;

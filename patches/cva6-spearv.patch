@@ -1,0 +1,2872 @@
+commit 19eaf312051db59453a0b30df04504cfab820ba3
+Author: David Schrammel <david.schrammel@iaik.tugraz.at>
+Date:   Mon Sep 4 13:50:33 2023 +0200
+
+    Initial commit
+
+diff --git a/Makefile b/Makefile
+index 75b00d5..2cb954c 100644
+--- a/Makefile
++++ b/Makefile
+@@ -21,6 +21,7 @@ verilator      ?= verilator
+ # traget option
+ target-options ?=
+ # additional definess
++#defines        ?= WT_DCACHE +define+MTAGDEBUG
+ defines        ?= WT_DCACHE
+ # test name for torture runs (binary name)
+ test-location  ?= output/test
+@@ -334,8 +335,7 @@ generate-trace-vsim:
+ 	make generate-trace
+ 
+ sim: build
+-	vsim${questa_version} +permissive $(questa-flags) -lib $(library) +MAX_CYCLES=$(max_cycles) +UVM_TESTNAME=$(test_case) \
+-	-do "coverage save -onexit $(preload).ucdb; run -a; quit -code [coverage attribute -name TESTSTATUS -concise -value $(preload)]" $(questa-cmd) \
++	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +MAX_CYCLES=$(max_cycles) +UVM_TESTNAME=$(test_case) \
+ 	+BASEDIR=$(riscv-test-dir) $(uvm-flags) $(QUESTASIM_FLAGS) -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi  \
+ 	${top_level}_optimized +permissive-off ++$(elf-bin) ++$(target-options) | tee sim.log
+ 
+diff --git a/fpga/scripts/run.tcl b/fpga/scripts/run.tcl
+index 53162fa..616a9b4 100644
+--- a/fpga/scripts/run.tcl
++++ b/fpga/scripts/run.tcl
+@@ -36,6 +36,16 @@ read_ip { \
+ }
+ # read_ip xilinx/xlnx_protocol_checker/ip/xlnx_protocol_checker.xci
+ 
++if {$::env(INCLUDE_FUTURE) eq "1"} {
++      set_property verilog_define INCLUDE_FUTURE=1 [current_fileset] 
++}
++if {$::env(TAGMPK) eq "1"} {
++      set_property verilog_define TAGMPK=1 [current_fileset] 
++}
++if {$::env(CUSTOM_FENCE) eq "1"} {
++      set_property verilog_define CUSTOM_FENCE=1 [current_fileset] 
++}
++
+ set_property include_dirs { "src/axi_sd_bridge/include" "../src/common_cells/include" } [current_fileset]
+ 
+ source scripts/add_sources.tcl
+diff --git a/include/ariane_pkg.sv b/include/ariane_pkg.sv
+index f98a6d3..4d2ddf3 100644
+--- a/include/ariane_pkg.sv
++++ b/include/ariane_pkg.sv
+@@ -23,6 +23,7 @@
+   `include "l15.tmp.h"
+ `endif
+ 
++
+ package ariane_pkg;
+ 
+     // ---------------
+@@ -357,7 +358,12 @@ package ariane_pkg;
+         MULT,      // 5
+         CSR,       // 6
+         FPU,       // 7
++`ifdef MTAGDEBUG
++        FPU_VEC,   // 8
++        TLBDEBUG   // 9
++`else
+         FPU_VEC    // 8
++`endif
+     } fu_t;
+ 
+     localparam EXC_OFF_RST      = 8'h80;
+@@ -446,9 +452,13 @@ package ariane_pkg;
+                                // set lower than operations
+                                SLTS, SLTU,
+                                // CSR functions
+-                               MRET, SRET, DRET, ECALL, WFI, FENCE, FENCE_I, SFENCE_VMA, CSR_WRITE, CSR_READ, CSR_SET, CSR_CLEAR,
++                               MRET, SRET, DRET, ECALL, WFI, FENCE, FENCE_I, SFENCE_VMA, CSR_WRITE, CSR_READ, CSR_SET, CSR_CLEAR, FENCE_T,
+                                // LSU functions
++`ifdef MTAGDEBUG
++                               LD, SD, LW, LWU, SW, LH, LHU, SH, LB, SB, LBU, RDTLB, RITLB,
++`else 
+                                LD, SD, LW, LWU, SW, LH, LHU, SH, LB, SB, LBU,
++`endif                           
+                                // Atomic Memory Operations
+                                AMO_LRW, AMO_LRD, AMO_SCW, AMO_SCD,
+                                AMO_SWAPW, AMO_ADDW, AMO_ANDW, AMO_ORW, AMO_XORW, AMO_MAXW, AMO_MAXWU, AMO_MINW, AMO_MINWU,
+@@ -630,6 +640,31 @@ package ariane_pkg;
+         AMO_CAS2 =4'b1101  // unused, not part of riscv spec, but provided in OpenPiton
+     } amo_t;
+ 
++    localparam TLB_SIZE = 16; 
++    localparam PPN_MEM_OFFSET = 44'h80000;
++
++    typedef struct packed {
++        logic                  e;
++        logic                  imm;
++        logic                  hpce;
++        riscv::pagetype_t      pt;
++        logic [ASID_WIDTH-1:0] eid;
++
++        `ifdef TAGMPK
++            logic [9:0]            mpk; //TODO remove if some define?
++            `ifdef INCLUDE_FUTURE
++                riscv::permissions_t   pte_perms; 
++                logic [53:0]           future;
++            `endif
++        `else
++            `ifdef INCLUDE_FUTURE
++                riscv::permissions_t   pte_perms; 
++                logic [63:0]           future;
++            `endif
++        `endif
++
++    } tlb_update_tagbits_t;
++
+     typedef struct packed {
+         logic                  valid;      // valid flag
+         logic                  is_2M;      //
+@@ -637,8 +672,11 @@ package ariane_pkg;
+         logic [26:0]           vpn;
+         logic [ASID_WIDTH-1:0] asid;
+         riscv::pte_t           content;
++        // tag stuff:
++        tlb_update_tagbits_t   tlb_update_tagbits;
+     } tlb_update_t;
+ 
++
+     // Bits required for representation of physical address space as 4K pages
+     // (e.g. 27*4K == 39bit address space).
+     localparam PPN4K_WIDTH = 38;
+@@ -711,6 +749,10 @@ package ariane_pkg;
+         logic                          kill_req;
+         logic                          tag_valid;
+     } dcache_req_i_t;
++    typedef struct packed {
++        logic nc;
++    } dcache_req2_i_t;
++
+ 
+     typedef struct packed {
+         logic                          data_gnt;
+diff --git a/include/riscv_pkg.sv b/include/riscv_pkg.sv
+index abcbce4..34dbf5e 100644
+--- a/include/riscv_pkg.sv
++++ b/include/riscv_pkg.sv
+@@ -35,6 +35,8 @@ package riscv;
+     localparam VLEN       = (XLEN == 32) ? 32 : 64;    // virtual address length
+     localparam PLEN       = (XLEN == 32) ? 32 : 56;    // physical address length
+ 
++    localparam MTAG_LEN = 128;
++
+     localparam IS_XLEN64  = (XLEN == 32) ? 1'b0 : 1'b1;
+     localparam ModeW      = (XLEN == 32) ? 1 : 4;
+     localparam ASIDW      = (XLEN == 32) ? 9 : 16;
+@@ -228,6 +230,10 @@ package riscv;
+     localparam OpcodeRsrvd3    = 7'b11_101_11;
+     localparam OpcodeCustom3   = 7'b11_110_11;
+ 
++`ifdef MTAGDEBUG
++    localparam OpcodeRXTLB     = 7'b11_110_11;
++`endif
++
+     // RV64C/RV32C listings:
+     // Quadrant 0
+     localparam OpcodeC0             = 2'b00;
+@@ -279,6 +285,93 @@ package riscv;
+         logic v;
+     } pte_t;
+ 
++    // ----------------------
++    // Memory Tagging
++    // ----------------------
++    typedef struct packed {
++        logic disable_imm_write_checks;
++        logic nc_ptw_in_e;
++        logic disable_immutable_pt_checks;
++        logic disable_tag_compare_checks;
++    } mtag_control_t;
++
++    typedef struct packed {
++        //logic g;
++        logic u;
++        logic x;
++        logic w;
++        logic r;
++    } permissions_t;
++    
++    typedef enum logic [2:0]
++    {
++        PT_NORMAL  = 3'b0,
++        PT_ENCLAVE,
++        PT_MONITOR,
++        PT_PAGETABLE,
++        PT_FUTURE1,
++        PT_FUTURE2,
++        PT_FUTURE3,
++        PT_FUTURE4
++    } pagetype_t;
++
++    // for now we use 11 bits for a MPK+wd and assume a max tag size of 128 bit
++    typedef struct packed {
++
++        // future bits
++        // upper 64 bit:
++        `ifdef TAGMPK
++            logic [MTAG_LEN-1:74] future;
++            logic [73:64]         mpk;
++        `else
++            logic [MTAG_LEN-1:64] future;
++        `endif
++        // lower 64 bit:
++        permissions_t         pte_perms; // [/*g,*/ u, x, w, r]
++        logic [59:24]         vpn;
++
++        // necessary bits
++        logic                 immutable;
++        logic                 not_implemented__validated;
++        logic [21:20]         page_level;
++        logic                 hpce; // huge page containing enclave 
++        pagetype_t            pt; // page type
++        logic [15: 0]         id;
++    } mtag_t;
++
++    typedef struct packed {
++        logic               slot_3_wd;
++        logic [42:33]       slot_3_mpkey;
++        logic               slot_2_wd;
++        logic [31:22]       slot_2_mpkey;
++        logic               slot_1_wd;
++        logic [20:11]       slot_1_mpkey;
++        logic               slot_0_wd;
++        logic [9:0]         slot_0_mpkey;
++    } mpkey_config_t;
++
++    typedef enum logic [1:0] {
++        MTAG0 = 2'b00,
++        MTAG32,
++        MTAG64,
++        MTAG128
++    } tagmode_t;
++
++    typedef enum logic [1:0] {
++        PL_KILO    = 2'b00, // 4 KiB
++        PL_MEGA    = 2'b01, // 2 MiB
++        PL_GIGA    = 2'b10, // 1 GiB
++        PL_INVALID = 2'b11
++    } page_level_t;
++
++    typedef enum logic [1:0] {
++        EAM_NORMAL = 2'b00,
++        EAM_ENCLAVE,
++        EAM_SHARED,
++        EAM_FUTURE2
++    } eam_t;
++
++
+     // ----------------------
+     // Exception Cause Codes
+     // ----------------------
+@@ -298,6 +391,14 @@ package riscv;
+     localparam logic [XLEN-1:0] STORE_PAGE_FAULT      = 15; // Store page fault
+     localparam logic [XLEN-1:0] DEBUG_REQUEST         = 24; // Debug request
+ 
++    localparam logic [XLEN-1:0] MPKEY_MISMATCH_FAULT  = 25;
++    localparam logic [XLEN-1:0] ENCLAVE_ACCESS_FAULT  = 26;
++    localparam logic [XLEN-1:0] MEID_MISMATCH_FAULT   = 27;
++    localparam logic [XLEN-1:0] ENC_INTEGRITY_FAULT   = 28;
++    localparam logic [XLEN-1:0] SATP_MODE_CHANGE      = 29;
++    localparam logic [XLEN-1:0] ST_IMM_FAULT          = 30;
++    localparam logic [XLEN-1:0] HPCE_FAULT            = 31;
++
+     localparam int unsigned IRQ_S_SOFT  = 1;
+     localparam int unsigned IRQ_M_SOFT  = 3;
+     localparam int unsigned IRQ_S_TIMER = 5;
+@@ -455,7 +556,19 @@ package riscv;
+         CSR_HPM_COUNTER_28 = 12'hC1C,  // reserved
+         CSR_HPM_COUNTER_29 = 12'hC1D,  // reserved
+         CSR_HPM_COUNTER_30 = 12'hC1E,  // reserved
+-        CSR_HPM_COUNTER_31 = 12'hC1F  // reserved
++        CSR_HPM_COUNTER_31 = 12'hC1F,  // reserved
++        // memory tagging CSRs
++        CSR_U_TAG_SIZE         = 12'h066,
++        CSR_U_TAG_MODE         = 12'h067,
++        CSR_U_TAG_STORAGE_BASE = 12'h068,
++        CSR_U_MPKEY_CONFIG     = 12'h069,
++        CSR_U_EAM              = 12'h070,
++        CSR_U_MEID             = 12'h071,
++        CSR_U_TLB_SIZE         = 12'h072,
++        CSR_U_EMP              = 12'h073,
++        CSR_U_TCS              = 12'h074,
++        CSR_U_TAG_CONTROL      = 12'h075,
++        CSR_U_TAG_DRAM_BASE    = 12'h076
+     } csr_reg_t;
+ 
+     localparam logic [63:0] SSTATUS_UIE  = 'h00000001;
+diff --git a/src/ariane.sv b/src/ariane.sv
+index 409433b..fcfffb1 100644
+--- a/src/ariane.sv
++++ b/src/ariane.sv
+@@ -170,6 +170,16 @@ module ariane import ariane_pkg::*; #(
+   logic                     mxr_csr_ex;
+   logic [riscv::PPNW-1:0]   satp_ppn_csr_ex;
+   logic [ASID_WIDTH-1:0]    asid_csr_ex;
++
++  riscv::mpkey_config_t     mpkey_config_csr_ex;
++  logic [riscv::XLEN-1:0]   tag_sto_base_csr_ex;
++  logic [riscv::PPNW-1:0]   tag_dram_base_csr_ex;
++  riscv::tagmode_t          tag_mode_csr_ex;
++  riscv::eam_t              eam_csr_ex;
++  logic [riscv::ASIDW-1:0]  meid_csr_ex;
++  riscv::mtag_control_t     tag_control_csr_ex;
++   
++
+   logic [11:0]              csr_addr_ex_csr;
+   fu_op                     csr_op_commit_csr;
+   riscv::xlen_t             csr_wdata_commit_csr;
+@@ -212,12 +222,23 @@ module ariane import ariane_pkg::*; #(
+   logic                     fence_i_commit_controller;
+   logic                     fence_commit_controller;
+   logic                     sfence_vma_commit_controller;
++  `ifdef CUSTOM_FENCE
++  logic [19:0]              fence_t_commit_controller;
++  `endif
+   logic                     halt_ctrl;
+   logic                     halt_csr_ctrl;
+   logic                     dcache_flush_ctrl_cache;
+   logic                     dcache_flush_ack_cache_ctrl;
+   logic                     set_debug_pc;
+   logic                     flush_commit;
++  `ifdef CUSTOM_FENCE
++  logic                     flush_dcache_lfsr_ctrl_cache;
++  logic                     flush_icache_lfsr_ctrl_cache;
++  logic                     flush_tlb_plru_tree_ctrl_ex;
++  logic                     flush_dcache_mem_arb_ctrl_cache;
++  logic                     flush_dcache_wbuffer_arb_ctrl_cache;
++  logic                     flush_dcache_fifo_ctrl_cache;
++  `endif
+ 
+   icache_areq_i_t           icache_areq_ex_cache;
+   icache_areq_o_t           icache_areq_cache_ex;
+@@ -232,6 +253,7 @@ module ariane import ariane_pkg::*; #(
+   // DCache <-> *
+   // ----------------
+   dcache_req_i_t [2:0]      dcache_req_ports_ex_cache;
++  dcache_req2_i_t [2:0]     dcache_req2_ports_ex_cache;
+   dcache_req_o_t [2:0]      dcache_req_ports_cache_ex;
+   logic                     dcache_commit_wbuffer_empty;
+   logic                     dcache_commit_wbuffer_not_ni;
+@@ -243,7 +265,11 @@ module ariane import ariane_pkg::*; #(
+     .ArianeCfg ( ArianeCfg )
+   ) i_frontend (
+     .flush_i             ( flush_ctrl_if                 ), // not entirely correct
++    `ifdef CUSTOM_FENCE
++    .flush_bp_i          ( flush_ctrl_bp                 ),
++    `else
+     .flush_bp_i          ( 1'b0                          ),
++    `endif
+     .debug_mode_i        ( debug_mode                    ),
+     .boot_addr_i         ( boot_addr_i[riscv::VLEN-1:0]  ),
+     .icache_dreq_i       ( icache_dreq_cache_if          ),
+@@ -425,17 +451,28 @@ module ariane import ariane_pkg::*; #(
+     .enable_translation_i   ( enable_translation_csr_ex   ), // from CSR
+     .en_ld_st_translation_i ( en_ld_st_translation_csr_ex ),
+     .flush_tlb_i            ( flush_tlb_ctrl_ex           ),
++    `ifdef CUSTOM_FENCE
++    .flush_tlb_plru_tree_i  ( flush_tlb_plru_tree_ctrl_ex ),
++    `endif
+     .priv_lvl_i             ( priv_lvl                    ), // from CSR
+     .ld_st_priv_lvl_i       ( ld_st_priv_lvl_csr_ex       ), // from CSR
+     .sum_i                  ( sum_csr_ex                  ), // from CSR
+     .mxr_i                  ( mxr_csr_ex                  ), // from CSR
+     .satp_ppn_i             ( satp_ppn_csr_ex             ), // from CSR
+     .asid_i                 ( asid_csr_ex                 ), // from CSR
+-    .icache_areq_i          ( icache_areq_cache_ex        ),
++    .tag_mode_i             ( tag_mode_csr_ex             ), // from CSR
++    .tag_sto_base_i         ( tag_sto_base_csr_ex         ), // from CSR
++    .tag_dram_base_i        ( tag_dram_base_csr_ex        ), // from CSR
++    .mpkey_config_i         ( mpkey_config_csr_ex         ), // from CSR
++    .eam_i                  ( eam_csr_ex                  ), // from CSR
++    .meid_i                 ( meid_csr_ex                 ), // from CSR
++    .tag_control_i          ( tag_control_csr_ex          ), // from CSR
++    .icache_areq_i          ( icache_areq_cache_ex        ), 
+     .icache_areq_o          ( icache_areq_ex_cache        ),
+     // DCACHE interfaces
+     .dcache_req_ports_i     ( dcache_req_ports_cache_ex   ),
+     .dcache_req_ports_o     ( dcache_req_ports_ex_cache   ),
++    .dcache_req2_ports_o    ( dcache_req2_ports_ex_cache   ),
+     .dcache_wbuffer_empty_i ( dcache_commit_wbuffer_empty ),
+     .dcache_wbuffer_not_ni_i ( dcache_commit_wbuffer_not_ni ),
+     // PMP
+@@ -483,6 +520,9 @@ module ariane import ariane_pkg::*; #(
+     .fence_i_o              ( fence_i_commit_controller     ),
+     .fence_o                ( fence_commit_controller       ),
+     .sfence_vma_o           ( sfence_vma_commit_controller  ),
++    `ifdef CUSTOM_FENCE
++    .fence_t_o              ( fence_t_commit_controller     ),
++    `endif
+     .flush_commit_o         ( flush_commit                  ),
+     .*
+   );
+@@ -528,6 +568,13 @@ module ariane import ariane_pkg::*; #(
+     .mxr_o                  ( mxr_csr_ex                    ),
+     .satp_ppn_o             ( satp_ppn_csr_ex               ),
+     .asid_o                 ( asid_csr_ex                   ),
++    .tag_mode_o             ( tag_mode_csr_ex               ),
++    .tag_sto_base_o         ( tag_sto_base_csr_ex           ),
++    .tag_dram_base_o        ( tag_dram_base_csr_ex          ),
++    .mpkey_config_o         ( mpkey_config_csr_ex           ),
++    .eam_o                  ( eam_csr_ex                    ),
++    .meid_o                 ( meid_csr_ex                   ),
++    .tag_control_o          ( tag_control_csr_ex            ),
+     .tvm_o                  ( tvm_csr_id                    ),
+     .tw_o                   ( tw_csr_id                     ),
+     .tsr_o                  ( tsr_csr_id                    ),
+@@ -577,15 +624,23 @@ module ariane import ariane_pkg::*; #(
+   // ------------
+   controller controller_i (
+     // flush ports
+-    .set_pc_commit_o        ( set_pc_ctrl_pcgen             ),
+-    .flush_unissued_instr_o ( flush_unissued_instr_ctrl_id  ),
+-    .flush_if_o             ( flush_ctrl_if                 ),
+-    .flush_id_o             ( flush_ctrl_id                 ),
+-    .flush_ex_o             ( flush_ctrl_ex                 ),
+-    .flush_bp_o             ( flush_ctrl_bp                 ),
+-    .flush_tlb_o            ( flush_tlb_ctrl_ex             ),
+-    .flush_dcache_o         ( dcache_flush_ctrl_cache       ),
+-    .flush_dcache_ack_i     ( dcache_flush_ack_cache_ctrl   ),
++    .set_pc_commit_o             ( set_pc_ctrl_pcgen                   ),
++    .flush_unissued_instr_o      ( flush_unissued_instr_ctrl_id        ),
++    .flush_if_o                  ( flush_ctrl_if                       ),
++    .flush_id_o                  ( flush_ctrl_id                       ),
++    .flush_ex_o                  ( flush_ctrl_ex                       ),
++    .flush_bp_o                  ( flush_ctrl_bp                       ),
++    .flush_tlb_o                 ( flush_tlb_ctrl_ex                   ),
++    .flush_dcache_o              ( dcache_flush_ctrl_cache             ),
++    .flush_dcache_ack_i          ( dcache_flush_ack_cache_ctrl         ),
++    `ifdef CUSTOM_FENCE
++    .flush_dcache_lfsr_o         ( flush_dcache_lfsr_ctrl_cache        ),
++    .flush_icache_lfsr_o         ( flush_icache_lfsr_ctrl_cache        ),
++    .flush_tlb_plru_tree_o       ( flush_tlb_plru_tree_ctrl_ex         ),
++    .flush_dcache_mem_arb_o      ( flush_dcache_mem_arb_ctrl_cache     ),
++    .flush_dcache_wbuffer_arb_o  ( flush_dcache_wbuffer_arb_ctrl_cache ),
++    .flush_dcache_fifo_o         ( flush_dcache_fifo_ctrl_cache        ),
++    `endif
+ 
+     .halt_csr_i             ( halt_csr_ctrl                 ),
+     .halt_o                 ( halt_ctrl                     ),
+@@ -597,6 +652,9 @@ module ariane import ariane_pkg::*; #(
+     .resolved_branch_i      ( resolved_branch               ),
+     .fence_i_i              ( fence_i_commit_controller     ),
+     .fence_i                ( fence_commit_controller       ),
++    `ifdef CUSTOM_FENCE
++    .fence_t_i              ( fence_t_commit_controller     ),
++    `endif
+     .sfence_vma_i           ( sfence_vma_commit_controller  ),
+     .flush_commit_i         ( flush_commit                  ),
+ 
+@@ -625,15 +683,23 @@ module ariane import ariane_pkg::*; #(
+     .icache_dreq_i         ( icache_dreq_if_cache        ),
+     .icache_dreq_o         ( icache_dreq_cache_if        ),
+     // D$
+-    .dcache_enable_i       ( dcache_en_csr_nbdcache      ),
+-    .dcache_flush_i        ( dcache_flush_ctrl_cache     ),
+-    .dcache_flush_ack_o    ( dcache_flush_ack_cache_ctrl ),
++    .dcache_enable_i            ( dcache_en_csr_nbdcache              ),
++    .dcache_flush_i             ( dcache_flush_ctrl_cache             ),
++    .dcache_flush_ack_o         ( dcache_flush_ack_cache_ctrl         ),
++    `ifdef CUSTOM_FENCE
++    .flush_dcache_lfsr_i        ( flush_dcache_lfsr_ctrl_cache        ),
++    .flush_icache_lfsr_i        ( flush_icache_lfsr_ctrl_cache        ),
++    .flush_dcache_mem_arb_i     ( flush_dcache_mem_arb_ctrl_cache     ),
++    .flush_dcache_wbuffer_arb_i ( flush_dcache_wbuffer_arb_ctrl_cache ),
++    .flush_dcache_fifo_i        ( flush_dcache_fifo_ctrl_cache        ),
++    `endif
+     // to commit stage
+     .dcache_amo_req_i      ( amo_req                     ),
+     .dcache_amo_resp_o     ( amo_resp                    ),
+     // from PTW, Load Unit  and Store Unit
+     .dcache_miss_o         ( dcache_miss_cache_perf      ),
+     .dcache_req_ports_i    ( dcache_req_ports_ex_cache   ),
++    .dcache_req2_ports_i   ( dcache_req2_ports_ex_cache  ),
+     .dcache_req_ports_o    ( dcache_req_ports_cache_ex   ),
+     // write buffer status
+     .wbuffer_empty_o       ( dcache_commit_wbuffer_empty ),
+diff --git a/src/cache_subsystem/cva6_icache.sv b/src/cache_subsystem/cva6_icache.sv
+index 7c0b330..dae0439 100644
+--- a/src/cache_subsystem/cva6_icache.sv
++++ b/src/cache_subsystem/cva6_icache.sv
+@@ -33,6 +33,9 @@ module cva6_icache import ariane_pkg::*; import wt_cache_pkg::*; #(
+   input  logic                      rst_ni,
+ 
+   input  logic                      flush_i,              // flush the icache, flush and kill have to be asserted together
++  `ifdef CUSTOM_FENCE
++  input  logic                      flush_lfsr_i,
++  `endif
+   input  logic                      en_i,                 // enable icache
+   output logic                      miss_o,               // to performance counter
+   // address translation requests
+@@ -375,6 +378,9 @@ end else begin : gen_piton_offset
+     .clk_i          ( clk_i       ),
+     .rst_ni         ( rst_ni      ),
+     .en_i           ( update_lfsr ),
++    `ifdef CUSTOM_FENCE
++    .flush_i        ( flush_lfsr_i),
++    `endif
+     .refill_way_oh  (             ),
+     .refill_way_bin ( rnd_way     )
+   );
+diff --git a/src/cache_subsystem/cva6_icache_axi_wrapper.sv b/src/cache_subsystem/cva6_icache_axi_wrapper.sv
+index 1aeab62..1129332 100644
+--- a/src/cache_subsystem/cva6_icache_axi_wrapper.sv
++++ b/src/cache_subsystem/cva6_icache_axi_wrapper.sv
+@@ -101,6 +101,9 @@ module cva6_icache_axi_wrapper import ariane_pkg::*; import wt_cache_pkg::*; #(
+     .clk_i              ( clk_i               ),
+     .rst_ni             ( rst_ni              ),
+     .flush_i            ( flush_i             ),
++    `ifdef CUSTOM_FENCE
++    .flush_lfsr_i       ( 1'b0                ),
++    `endif
+     .en_i               ( en_i                ),
+     .miss_o             ( miss_o              ),
+     .areq_i             ( areq_i              ),
+@@ -185,4 +188,4 @@ module cva6_icache_axi_wrapper import ariane_pkg::*; import wt_cache_pkg::*; #(
+     end
+   end
+ 
+-endmodule // cva6_icache_axi_wrapper
+\ No newline at end of file
++endmodule // cva6_icache_axi_wrapper
+diff --git a/src/cache_subsystem/std_cache_subsystem.sv b/src/cache_subsystem/std_cache_subsystem.sv
+index 0523fb6..6659662 100644
+--- a/src/cache_subsystem/std_cache_subsystem.sv
++++ b/src/cache_subsystem/std_cache_subsystem.sv
+@@ -61,18 +61,21 @@ module std_cache_subsystem import ariane_pkg::*; import std_cache_pkg::*; #(
+     cva6_icache_axi_wrapper #(
+         .ArianeCfg  ( ArianeCfg             )
+     ) i_cva6_icache_axi_wrapper (
+-        .clk_i      ( clk_i                 ),
+-        .rst_ni     ( rst_ni                ),
+-        .priv_lvl_i ( priv_lvl_i            ),
+-        .flush_i    ( icache_flush_i        ),
+-        .en_i       ( icache_en_i           ),
+-        .miss_o     ( icache_miss_o         ),
+-        .areq_i     ( icache_areq_i         ),
+-        .areq_o     ( icache_areq_o         ),
+-        .dreq_i     ( icache_dreq_i         ),
+-        .dreq_o     ( icache_dreq_o         ),
+-        .axi_req_o  ( axi_req_icache        ),
+-        .axi_resp_i ( axi_resp_icache       )
++        .clk_i          ( clk_i                 ),
++        .rst_ni         ( rst_ni                ),
++        .priv_lvl_i     ( priv_lvl_i            ),
++        .flush_i        ( icache_flush_i        ),
++        `ifdef CUSTOM_FENCE
++        .flush_lfsr_i   ( 1'b0                  ), 
++        `endif
++        .en_i           ( icache_en_i           ),
++        .miss_o         ( icache_miss_o         ),
++        .areq_i         ( icache_areq_i         ),
++        .areq_o         ( icache_areq_o         ),
++        .dreq_i         ( icache_dreq_i         ),
++        .dreq_o         ( icache_dreq_o         ),
++        .axi_req_o      ( axi_req_icache        ),
++        .axi_resp_i     ( axi_resp_icache       )
+     );
+ 
+    // decreasing priority
+diff --git a/src/cache_subsystem/wt_cache_subsystem.sv b/src/cache_subsystem/wt_cache_subsystem.sv
+index d3e39c8..fd01609 100644
+--- a/src/cache_subsystem/wt_cache_subsystem.sv
++++ b/src/cache_subsystem/wt_cache_subsystem.sv
+@@ -40,12 +40,21 @@ module wt_cache_subsystem import ariane_pkg::*; import wt_cache_pkg::*; #(
+   input  logic                           dcache_flush_i,         // high until acknowledged
+   output logic                           dcache_flush_ack_o,     // send a single cycle acknowledge signal when the cache is flushed
+   output logic                           dcache_miss_o,          // we missed on a ld/st
++  `ifdef CUSTOM_FENCE
++  input  logic                           flush_dcache_lfsr_i,
++  input  logic                           flush_icache_lfsr_i,
++  input  logic                           flush_dcache_mem_arb_i,
++  input  logic                           flush_dcache_wbuffer_arb_i,
++  input  logic                           flush_dcache_fifo_i,
++  `endif
+   // AMO interface
+   input amo_req_t                        dcache_amo_req_i,
+   output amo_resp_t                      dcache_amo_resp_o,
+   // Request ports
+   input  dcache_req_i_t   [2:0]          dcache_req_ports_i,     // to/from LSU
++  input  dcache_req2_i_t  [2:0]          dcache_req2_ports_i,     // to/from LSU
+   output dcache_req_o_t   [2:0]          dcache_req_ports_o,     // to/from LSU
++
+   // writebuffer status
+   output logic                           wbuffer_empty_o,
+   output logic                           wbuffer_not_ni_o,
+@@ -78,6 +87,9 @@ module wt_cache_subsystem import ariane_pkg::*; import wt_cache_pkg::*; #(
+     .clk_i              ( clk_i                   ),
+     .rst_ni             ( rst_ni                  ),
+     .flush_i            ( icache_flush_i          ),
++    `ifdef CUSTOM_FENCE
++    .flush_lfsr_i       ( flush_icache_lfsr_i     ),
++    `endif
+     .en_i               ( icache_en_i             ),
+     .miss_o             ( icache_miss_o           ),
+     .areq_i             ( icache_areq_i           ),
+@@ -102,23 +114,30 @@ module wt_cache_subsystem import ariane_pkg::*; import wt_cache_pkg::*; #(
+     .RdAmoTxId       ( 1             ),
+     .ArianeCfg       ( ArianeCfg     )
+   ) i_wt_dcache (
+-    .clk_i           ( clk_i                   ),
+-    .rst_ni          ( rst_ni                  ),
+-    .enable_i        ( dcache_enable_i         ),
+-    .flush_i         ( dcache_flush_i          ),
+-    .flush_ack_o     ( dcache_flush_ack_o      ),
+-    .miss_o          ( dcache_miss_o           ),
+-    .wbuffer_empty_o ( wbuffer_empty_o         ),
+-    .wbuffer_not_ni_o ( wbuffer_not_ni_o       ),
+-    .amo_req_i       ( dcache_amo_req_i        ),
+-    .amo_resp_o      ( dcache_amo_resp_o       ),
+-    .req_ports_i     ( dcache_req_ports_i      ),
+-    .req_ports_o     ( dcache_req_ports_o      ),
+-    .mem_rtrn_vld_i  ( adapter_dcache_rtrn_vld ),
+-    .mem_rtrn_i      ( adapter_dcache          ),
+-    .mem_data_req_o  ( dcache_adapter_data_req ),
+-    .mem_data_ack_i  ( adapter_dcache_data_ack ),
+-    .mem_data_o      ( dcache_adapter          )
++    .clk_i                ( clk_i                       ),
++    .rst_ni               ( rst_ni                      ),
++    .enable_i             ( dcache_enable_i             ),
++    .flush_i              ( dcache_flush_i              ),
++    .flush_ack_o          ( dcache_flush_ack_o          ),
++    `ifdef CUSTOM_FENCE
++    .flush_lfsr_i         ( flush_dcache_lfsr_i         ),
++    .flush_mem_arb_i      ( flush_dcache_mem_arb_i      ),
++    .flush_wbuffer_arb_i  ( flush_dcache_wbuffer_arb_i  ),
++    .flush_fifo_i         ( flush_dcache_fifo_i         ),
++    `endif
++    .miss_o               ( dcache_miss_o               ),
++    .wbuffer_empty_o      ( wbuffer_empty_o             ),
++    .wbuffer_not_ni_o     ( wbuffer_not_ni_o            ),
++    .amo_req_i            ( dcache_amo_req_i            ),
++    .amo_resp_o           ( dcache_amo_resp_o           ),
++    .req_ports_i          ( dcache_req_ports_i          ),
++    .req2_ports_i         ( dcache_req2_ports_i         ),
++    .req_ports_o          ( dcache_req_ports_o          ),
++    .mem_rtrn_vld_i       ( adapter_dcache_rtrn_vld     ),
++    .mem_rtrn_i           ( adapter_dcache              ),
++    .mem_data_req_o       ( dcache_adapter_data_req     ),
++    .mem_data_ack_i       ( adapter_dcache_data_ack     ),
++    .mem_data_o           ( dcache_adapter              )
+   );
+ 
+ 
+diff --git a/src/cache_subsystem/wt_dcache.sv b/src/cache_subsystem/wt_dcache.sv
+index 28e1d4a..d943e4d 100644
+--- a/src/cache_subsystem/wt_dcache.sv
++++ b/src/cache_subsystem/wt_dcache.sv
+@@ -27,6 +27,12 @@ module wt_dcache import ariane_pkg::*; import wt_cache_pkg::*; #(
+   input  logic                           enable_i,    // from CSR
+   input  logic                           flush_i,     // high until acknowledged
+   output logic                           flush_ack_o, // send a single cycle acknowledge signal when the cache is flushed
++  `ifdef CUSTOM_FENCE
++  input  logic                           flush_lfsr_i,
++  input  logic                           flush_mem_arb_i,
++  input  logic                           flush_wbuffer_arb_i,
++  input  logic                           flush_fifo_i,
++  `endif
+   output logic                           miss_o,      // we missed on a ld/st
+   output logic                           wbuffer_empty_o,
+   output logic                           wbuffer_not_ni_o,
+@@ -37,6 +43,7 @@ module wt_dcache import ariane_pkg::*; import wt_cache_pkg::*; #(
+ 
+   // Request ports
+   input  dcache_req_i_t [2:0]            req_ports_i,
++  input  dcache_req2_i_t [2:0]           req2_ports_i,
+   output dcache_req_o_t [2:0]            req_ports_o,
+ 
+   input  logic                           mem_rtrn_vld_i,
+@@ -117,6 +124,9 @@ module wt_dcache import ariane_pkg::*; import wt_cache_pkg::*; #(
+     .enable_i           ( enable_i           ),
+     .flush_i            ( flush_i            ),
+     .flush_ack_o        ( flush_ack_o        ),
++    `ifdef CUSTOM_FENCE
++    .flush_lfsr_i       ( flush_lfsr_i       ),
++    `endif
+     .miss_o             ( miss_o             ),
+     .wbuffer_empty_i    ( wbuffer_empty_o    ),
+     .cache_en_o         ( cache_en           ),
+@@ -175,6 +185,7 @@ module wt_dcache import ariane_pkg::*; import wt_cache_pkg::*; #(
+       .cache_en_i      ( cache_en          ),
+       // reqs from core
+       .req_port_i      ( req_ports_i   [k] ),
++      .req2_port_i     ( req2_ports_i  [k] ),
+       .req_port_o      ( req_ports_o   [k] ),
+       // miss interface
+       .miss_req_o      ( miss_req      [k] ),
+@@ -214,6 +225,11 @@ module wt_dcache import ariane_pkg::*; import wt_cache_pkg::*; #(
+   ) i_wt_dcache_wbuffer (
+     .clk_i           ( clk_i               ),
+     .rst_ni          ( rst_ni              ),
++    `ifdef CUSTOM_FENCE
++    .flush_i         ( flush_i             ),
++    .flush_arb_i     ( flush_wbuffer_arb_i ),
++    .flush_fifo_i    ( flush_fifo_i        ),
++    `endif
+     .empty_o         ( wbuffer_empty_o     ),
+     .not_ni_o        ( wbuffer_not_ni_o    ),
+     // TODO: fix this
+@@ -270,6 +286,10 @@ module wt_dcache import ariane_pkg::*; import wt_cache_pkg::*; #(
+   ) i_wt_dcache_mem (
+     .clk_i             ( clk_i              ),
+     .rst_ni            ( rst_ni             ),
++    `ifdef CUSTOM_FENCE
++    .flush_i           ( flush_i            ),
++    .flush_arb_i       ( flush_mem_arb_i    ),
++    `endif
+     // read ports
+     .rd_prio_i         ( rd_prio            ),
+     .rd_tag_i          ( rd_tag             ),
+diff --git a/src/cache_subsystem/wt_dcache_ctrl.sv b/src/cache_subsystem/wt_dcache_ctrl.sv
+index 2254870..fd0df77 100644
+--- a/src/cache_subsystem/wt_dcache_ctrl.sv
++++ b/src/cache_subsystem/wt_dcache_ctrl.sv
+@@ -22,6 +22,7 @@ module wt_dcache_ctrl import ariane_pkg::*; import wt_cache_pkg::*; #(
+   input  logic                            cache_en_i,
+   // core request ports
+   input  dcache_req_i_t                   req_port_i,
++  input  dcache_req2_i_t                  req2_port_i,
+   output dcache_req_o_t                   req_port_o,
+   // interface to miss handler
+   output logic                            miss_req_o,
+@@ -59,6 +60,7 @@ module wt_dcache_ctrl import ariane_pkg::*; import wt_cache_pkg::*; #(
+   logic [DCACHE_SET_ASSOC-1:0]    vld_data_d,    vld_data_q;
+   logic save_tag, rd_req_d, rd_req_q, rd_ack_d, rd_ack_q;
+   logic [1:0] data_size_d, data_size_q;
++  logic req_nc_d, req_nc_q;
+ 
+ ///////////////////////////////////////////////////////
+ // misc
+@@ -70,6 +72,7 @@ module wt_dcache_ctrl import ariane_pkg::*; import wt_cache_pkg::*; #(
+   assign address_idx_d = (req_port_o.data_gnt) ? req_port_i.address_index[DCACHE_INDEX_WIDTH-1:DCACHE_OFFSET_WIDTH] : address_idx_q;
+   assign address_off_d = (req_port_o.data_gnt) ? req_port_i.address_index[DCACHE_OFFSET_WIDTH-1:0]                  : address_off_q;
+   assign data_size_d   = (req_port_o.data_gnt) ? req_port_i.data_size                                               : data_size_q;
++  assign req_nc_d      = (req_port_o.data_gnt) ? req2_port_i.nc                                                     : req_nc_q;
+   assign rd_tag_o      = address_tag_d;
+   assign rd_idx_o      = address_idx_d;
+   assign rd_off_o      = address_off_d;
+@@ -82,9 +85,9 @@ module wt_dcache_ctrl import ariane_pkg::*; import wt_cache_pkg::*; #(
+   assign miss_size_o           = (miss_nc_o) ? data_size_q : 3'b111;
+ 
+   // noncacheable if request goes to I/O space, or if cache is disabled
++  //assign miss_nc_o = (req_nc_q) | (~cache_en_i) | (~ariane_pkg::is_inside_cacheable_regions(ArianeCfg, {{{64-DCACHE_TAG_WIDTH}{1'b0}}, address_tag_q, {DCACHE_INDEX_WIDTH{1'b0}}}));
+   assign miss_nc_o = (~cache_en_i) | (~ariane_pkg::is_inside_cacheable_regions(ArianeCfg, {{{64-DCACHE_TAG_WIDTH}{1'b0}}, address_tag_q, {DCACHE_INDEX_WIDTH{1'b0}}}));
+ 
+-
+   assign miss_we_o    = '0;
+   assign miss_wdata_o = '0;
+   assign miss_id_o    = RdTxId;
+@@ -238,6 +241,7 @@ module wt_dcache_ctrl import ariane_pkg::*; import wt_cache_pkg::*; #(
+       data_size_q      <= '0;
+       rd_req_q         <= '0;
+       rd_ack_q         <= '0;
++      req_nc_q         <= '0;
+     end else begin
+       state_q          <= state_d;
+       address_tag_q    <= address_tag_d;
+@@ -247,6 +251,7 @@ module wt_dcache_ctrl import ariane_pkg::*; import wt_cache_pkg::*; #(
+       data_size_q      <= data_size_d;
+       rd_req_q         <= rd_req_d;
+       rd_ack_q         <= rd_ack_d;
++      req_nc_q         <= req_nc_d;
+     end
+   end
+ 
+diff --git a/src/cache_subsystem/wt_dcache_mem.sv b/src/cache_subsystem/wt_dcache_mem.sv
+index 54833c8..d144f23 100644
+--- a/src/cache_subsystem/wt_dcache_mem.sv
++++ b/src/cache_subsystem/wt_dcache_mem.sv
+@@ -32,6 +32,10 @@ module wt_dcache_mem import ariane_pkg::*; import wt_cache_pkg::*; #(
+ ) (
+   input  logic                                              clk_i,
+   input  logic                                              rst_ni,
++  `ifdef CUSTOM_FENCE
++  input  logic                                              flush_i,
++  input  logic                                              flush_arb_i,
++  `endif
+ 
+   // ports
+   input  logic  [NumPorts-1:0][DCACHE_TAG_WIDTH-1:0]        rd_tag_i,           // tag in - comes one cycle later
+@@ -138,10 +142,14 @@ module wt_dcache_mem import ariane_pkg::*; import wt_cache_pkg::*; #(
+     .NumIn     (NumPorts),
+     .DataWidth (1)
+   ) i_rr_arb_tree (
+-    .clk_i  (clk_i   ),
+-    .rst_ni (rst_ni  ),
+-    .flush_i('0      ),
+-    .rr_i   ('0      ),
++    .clk_i  (clk_i         ),
++    .rst_ni (rst_ni        ),
++    `ifdef CUSTOM_FENCE
++    .flush_i(flush_arb_i   ),
++    `else
++    .flush_i('0            ),
++    `endif
++    .rr_i   ('0            ),
+     .req_i  (rd_req_masked ),
+     .gnt_o  (rd_ack_o      ),
+     .data_i ('0            ),
+diff --git a/src/cache_subsystem/wt_dcache_missunit.sv b/src/cache_subsystem/wt_dcache_missunit.sv
+index ae1f7a1..4ed5b92 100644
+--- a/src/cache_subsystem/wt_dcache_missunit.sv
++++ b/src/cache_subsystem/wt_dcache_missunit.sv
+@@ -25,6 +25,9 @@ module wt_dcache_missunit import ariane_pkg::*; import wt_cache_pkg::*; #(
+   input  logic                                       enable_i,    // from CSR
+   input  logic                                       flush_i,     // flush request, this waits for pending tx (write, read) to finish and will clear the cache
+   output logic                                       flush_ack_o, // send a single cycle acknowledge signal when the cache is flushed
++  `ifdef CUSTOM_FENCE
++  input  logic                                       flush_lfsr_i,
++  `endif
+   output logic                                       miss_o,      // we missed on a ld/st
+   // local cache management signals
+   input  logic                                       wbuffer_empty_i,
+@@ -156,6 +159,9 @@ module wt_dcache_missunit import ariane_pkg::*; import wt_cache_pkg::*; #(
+     .clk_i          ( clk_i       ),
+     .rst_ni         ( rst_ni      ),
+     .en_i           ( update_lfsr ),
++    `ifdef CUSTOM_FENCE
++    .flush_i        ( flush_lfsr_i),
++    `endif
+     .refill_way_oh  (             ),
+     .refill_way_bin ( rnd_way     )
+   );
+diff --git a/src/cache_subsystem/wt_dcache_wbuffer.sv b/src/cache_subsystem/wt_dcache_wbuffer.sv
+index e87d8d8..212c4e7 100644
+--- a/src/cache_subsystem/wt_dcache_wbuffer.sv
++++ b/src/cache_subsystem/wt_dcache_wbuffer.sv
+@@ -54,6 +54,11 @@ module wt_dcache_wbuffer import ariane_pkg::*; import wt_cache_pkg::*; #(
+ ) (
+   input  logic                               clk_i,          // Clock
+   input  logic                               rst_ni,         // Asynchronous reset active low
++  `ifdef CUSTOM_FENCE
++  input  logic                               flush_i,        // flush internal buffers / states
++  input  logic                               flush_arb_i,
++  input  logic                               flush_fifo_i,
++  `endif
+ 
+   input  logic                               cache_en_i,     // writes are treated as NC if disabled
+   output logic                               empty_o,        // asserted if no data is present in write buffer
+@@ -204,7 +209,11 @@ module wt_dcache_wbuffer import ariane_pkg::*; import wt_cache_pkg::*; #(
+   ) i_rtrn_id_fifo (
+     .clk_i      ( clk_i            ),
+     .rst_ni     ( rst_ni           ),
++    `ifdef CUSTOM_FENCE
++    .flush_i    ( flush_fifo_i     ),
++    `else
+     .flush_i    ( 1'b0             ),
++    `endif
+     .testmode_i ( 1'b0             ),
+     .full_o     (                  ),
+     .empty_o    ( rtrn_empty       ),
+@@ -254,7 +263,11 @@ module wt_dcache_wbuffer import ariane_pkg::*; import wt_cache_pkg::*; #(
+   ) i_tx_id_rr (
+     .clk_i  (clk_i       ),
+     .rst_ni (rst_ni      ),
++    `ifdef CUSTOM_FENCE
++    .flush_i(flush_arb_i ),
++    `else
+     .flush_i('0          ),
++    `endif
+     .rr_i   ('0          ),
+     .req_i  (~tx_vld_o   ),
+     .gnt_o  (            ),
+@@ -354,7 +367,11 @@ module wt_dcache_wbuffer import ariane_pkg::*; import wt_cache_pkg::*; #(
+   ) i_dirty_rr (
+     .clk_i  ( clk_i             ),
+     .rst_ni ( rst_ni            ),
++    `ifdef CUSTOM_FENCE
++    .flush_i( flush_arb_i       ),
++    `else
+     .flush_i( '0                ),
++    `endif
+     .rr_i   ( '0                ),
+     .req_i  ( dirty             ),
+     .gnt_o  (                   ),
+@@ -372,7 +389,11 @@ module wt_dcache_wbuffer import ariane_pkg::*; import wt_cache_pkg::*; #(
+   ) i_clean_rr (
+     .clk_i  ( clk_i             ),
+     .rst_ni ( rst_ni            ),
++    `ifdef CUSTOM_FENCE
++    .flush_i( flush_arb_i       ),
++    `else
+     .flush_i( '0                ),
++    `endif
+     .rr_i   ( '0                ),
+     .req_i  ( tocheck           ),
+     .gnt_o  (                   ),
+diff --git a/src/commit_stage.sv b/src/commit_stage.sv
+index 42e65b8..486ee59 100644
+--- a/src/commit_stage.sv
++++ b/src/commit_stage.sv
+@@ -50,6 +50,9 @@ module commit_stage import ariane_pkg::*; #(
+     output logic                                    commit_csr_o,       // commit the pending CSR instruction
+     output logic                                    fence_i_o,          // flush I$ and pipeline
+     output logic                                    fence_o,            // flush D$ and pipeline
++    `ifdef CUSTOM_FENCE
++    output logic [19:0]                             fence_t_o,          // flush microarchitecture
++    `endif
+     output logic                                    flush_commit_o,     // request a pipeline flush
+     output logic                                    sfence_vma_o        // flush TLBs and pipeline
+ );
+@@ -109,6 +112,9 @@ module commit_stage import ariane_pkg::*; #(
+         fence_i_o          = 1'b0;
+         fence_o            = 1'b0;
+         sfence_vma_o       = 1'b0;
++        `ifdef CUSTOM_FENCE
++        fence_t_o          = 20'b0;
++        `endif
+         csr_write_fflags_o = 1'b0;
+         flush_commit_o  = 1'b0;
+ 
+@@ -161,7 +167,19 @@ module commit_stage import ariane_pkg::*; #(
+                   we_gpr_o[0] = 1'b0;
+                 end
+             end
++            `ifdef CUSTOM_FENCE
+             // ------------------
++            // FENCE.T Logic
++            // ------------------
++            // fence.t is idempotent so we can safely re-execute it after returning
++            // from interrupt service routine
++            if (commit_instr_i[0].op == FENCE_T) begin
++                commit_ack_o[0] = no_st_pending_i;
++                // tell the controller to flush the D$
++                fence_t_o = no_st_pending_i ? commit_instr_i[0].result[31:12] : 20'b0;
++            end
++            // ------------------
++            `endif
+             // SFENCE.VMA Logic
+             // ------------------
+             // sfence.vma is idempotent so we can safely re-execute it after returning
+diff --git a/src/controller.sv b/src/controller.sv
+index 6e8a1dc..90a75e0 100644
+--- a/src/controller.sv
++++ b/src/controller.sv
+@@ -26,6 +26,14 @@ module controller import ariane_pkg::*; (
+     output logic            flush_dcache_o,         // Flush DCache
+     input  logic            flush_dcache_ack_i,     // Acknowledge the whole DCache Flush
+     output logic            flush_tlb_o,            // Flush TLBs
++    `ifdef CUSTOM_FENCE
++    output logic            flush_dcache_lfsr_o,
++    output logic            flush_icache_lfsr_o,
++    output logic            flush_tlb_plru_tree_o,
++    output logic            flush_dcache_mem_arb_o,
++    output logic            flush_dcache_wbuffer_arb_o,
++    output logic            flush_dcache_fifo_o,
++    `endif
+ 
+     input  logic            halt_csr_i,             // Halt request from CSR (WFI instruction)
+     output logic            halt_o,                 // Halt signal to commit stage
+@@ -36,6 +44,9 @@ module controller import ariane_pkg::*; (
+     input  logic            flush_csr_i,            // We got an instruction which altered the CSR, flush the pipeline
+     input  logic            fence_i_i,              // fence.i in
+     input  logic            fence_i,                // fence in
++    `ifdef CUSTOM_FENCE
++    input  logic [19:0]     fence_t_i,              // fence.t in
++    `endif
+     input  logic            sfence_vma_i,           // We got an instruction to flush the TLBs and pipeline
+     input  logic            flush_commit_i          // Flush request from commit stage
+ );
+@@ -58,6 +69,14 @@ module controller import ariane_pkg::*; (
+         flush_icache_o         = 1'b0;
+         flush_tlb_o            = 1'b0;
+         flush_bp_o             = 1'b0;
++        `ifdef CUSTOM_FENCE
++        flush_dcache_lfsr_o    = 1'b0;
++        flush_icache_lfsr_o    = 1'b0;
++        flush_tlb_plru_tree_o  = 1'b0;
++        flush_dcache_mem_arb_o     = 1'b0;
++        flush_dcache_wbuffer_arb_o = 1'b0;
++        flush_dcache_fifo_o        = 1'b0;
++        `endif
+         // ------------
+         // Mis-predict
+         // ------------
+@@ -129,6 +148,33 @@ module controller import ariane_pkg::*; (
+             flush_tlb_o            = 1'b1;
+         end
+ 
++        `ifdef CUSTOM_FENCE
++        // ---------------------------------
++        // FENCE.T
++        // ---------------------------------
++        if (fence_t_i[14]) begin
++            set_pc_commit_o            = |fence_t_i;
++
++            flush_if_o                 = fence_t_i[0];
++            flush_unissued_instr_o     = fence_t_i[1];
++            flush_id_o                 = fence_t_i[2];
++            flush_ex_o                 = fence_t_i[3];
++            flush_dcache               = fence_t_i[4];
++            flush_icache_o             = fence_t_i[5];
++            flush_tlb_o                = fence_t_i[6];
++            flush_bp_o                 = fence_t_i[7];
++            flush_dcache_lfsr_o        = fence_t_i[8];
++            flush_icache_lfsr_o        = fence_t_i[9];
++            flush_tlb_plru_tree_o      = fence_t_i[10];
++            flush_dcache_mem_arb_o     = fence_t_i[11];
++            flush_dcache_wbuffer_arb_o = fence_t_i[12];
++            flush_dcache_fifo_o        = fence_t_i[13];
++
++            fence_active_d             = fence_t_i[4];
++        end
++        `endif
++        
++
+         // Set PC to commit stage and flush pipleine
+         if (flush_csr_i || flush_commit_i) begin
+             set_pc_commit_o        = 1'b1;
+diff --git a/src/csr_regfile.sv b/src/csr_regfile.sv
+index 18a88fb..eb9012b 100644
+--- a/src/csr_regfile.sv
++++ b/src/csr_regfile.sv
+@@ -64,6 +64,14 @@ module csr_regfile import ariane_pkg::*; #(
+     output logic                  mxr_o,
+     output logic[riscv::PPNW-1:0] satp_ppn_o,
+     output logic [AsidWidth-1:0] asid_o,
++    // Memory tagging CSRs for LSU
++    output riscv::mpkey_config_t  mpkey_config_o,
++    output riscv::tagmode_t       tag_mode_o,
++    output logic[riscv::XLEN-1:0] tag_sto_base_o,
++    output logic[riscv::PPNW-1:0] tag_dram_base_o,
++    output riscv::eam_t           eam_o,
++    output logic [riscv::ASIDW-1:0]      meid_o,
++    output riscv::mtag_control_t  tag_control_o,
+     // external interrupts
+     input  logic [1:0]            irq_i,                      // external interrupt in
+     input  logic                  ipi_i,                      // inter processor interrupt -> connected to machine mode sw
+@@ -88,7 +96,7 @@ module csr_regfile import ariane_pkg::*; #(
+     output logic [15:0][riscv::PLEN-3:0] pmpaddr_o            // PMP addresses
+ );
+     // internal signal to keep track of access exceptions
+-    logic        read_access_exception, update_access_exception, privilege_violation;
++    logic        read_access_exception, update_access_exception, privilege_violation, satp_mode_exception;
+     logic        csr_we, csr_read;
+     riscv::xlen_t csr_wdata, csr_rdata;
+     riscv::priv_lvl_t   trap_to_priv_lvl;
+@@ -134,6 +142,18 @@ module csr_regfile import ariane_pkg::*; #(
+     riscv::xlen_t dcache_q,    dcache_d;
+     riscv::xlen_t icache_q,    icache_d;
+ 
++    // memory tagging
++    riscv::tagmode_t      tag_mode_q,         tag_mode_d;
++    riscv::xlen_t         tag_storage_base_q, tag_storage_base_d;
++    logic [riscv::PPNW-1:0] tag_dram_base_q, tag_dram_base_d;
++    riscv::eam_t          eam_q,              eam_d;
++    logic [riscv::ASIDW-1:0]     meid_q,      meid_d;
++    riscv::xlen_t         tcs_q,              tcs_d;
++    riscv::mtag_control_t tag_control_q,      tag_control_d; 
++`ifdef TAGMPK
++    riscv::mpkey_config_t mpkey_config_q,     mpkey_config_d;
++`endif
++
+     logic        wfi_d,       wfi_q;
+ 
+     riscv::xlen_t cycle_q,     cycle_d;
+@@ -303,6 +323,22 @@ module csr_regfile import ariane_pkg::*; #(
+                 riscv::CSR_PMPADDR13:        csr_rdata = {10'b0, pmpaddr_q[13][riscv::PLEN-3:1], (pmpcfg_q[13].addr_mode[1] == 1'b1 ? 1'b1 : 1'b0)};
+                 riscv::CSR_PMPADDR14:        csr_rdata = {10'b0, pmpaddr_q[14][riscv::PLEN-3:1], (pmpcfg_q[14].addr_mode[1] == 1'b1 ? 1'b1 : 1'b0)};
+                 riscv::CSR_PMPADDR15:        csr_rdata = {10'b0, pmpaddr_q[15][riscv::PLEN-3:1], (pmpcfg_q[15].addr_mode[1] == 1'b1 ? 1'b1 : 1'b0)};
++
++                riscv::CSR_U_TAG_MODE:          csr_rdata = tag_mode_q;
++                riscv::CSR_U_TAG_SIZE:          csr_rdata = (tag_mode_q == riscv::MTAG0) ? '0 : ((tag_mode_q == riscv::MTAG32) ? 32 : ((tag_mode_q == riscv::MTAG64) ? 64 : 128));
++                riscv::CSR_U_TAG_STORAGE_BASE:  csr_rdata = tag_storage_base_q;
++                riscv::CSR_U_TAG_DRAM_BASE:     csr_rdata = tag_dram_base_q; 
++`ifdef TAGMPK
++                riscv::CSR_U_MPKEY_CONFIG:      csr_rdata = mpkey_config_q;
++`else
++                riscv::CSR_U_MPKEY_CONFIG:      csr_rdata = '0;
++`endif
++                riscv::CSR_U_EAM:               csr_rdata = eam_q;
++                riscv::CSR_U_MEID:              csr_rdata = meid_q;
++                riscv::CSR_U_TLB_SIZE:          csr_rdata = TLB_SIZE; 
++                riscv::CSR_U_TCS:               csr_rdata = tcs_q;
++                riscv::CSR_U_TAG_CONTROL:       csr_rdata = tag_control_q;
++
+                 default: read_access_exception = 1'b1;
+             endcase
+         end
+@@ -338,6 +374,7 @@ module csr_regfile import ariane_pkg::*; #(
+         eret_o                  = 1'b0;
+         flush_o                 = 1'b0;
+         update_access_exception = 1'b0;
++        satp_mode_exception     = 1'b0;
+ 
+         set_debug_pc_o          = 1'b0;
+ 
+@@ -392,6 +429,17 @@ module csr_regfile import ariane_pkg::*; #(
+         pmpcfg_d                = pmpcfg_q;
+         pmpaddr_d               = pmpaddr_q;
+ 
++        tag_mode_d              = tag_mode_q;
++        tag_storage_base_d      = tag_storage_base_q;
++
++        meid_d                  = meid_q;
++        eam_d                   = eam_q;
++        tag_control_d           = tag_control_q;
++        tcs_d                   = tcs_q;
++`ifdef TAGMPK
++        mpkey_config_d          = mpkey_config_q;
++`endif
++
+         // check for correct access rights and that we are writing
+         if (csr_we) begin
+             unique case (csr_addr.address)
+@@ -486,11 +534,14 @@ module csr_regfile import ariane_pkg::*; #(
+                 riscv::CSR_STVAL:              stval_d     = csr_wdata;
+                 // supervisor address translation and protection
+                 riscv::CSR_SATP: begin
++                    satp = riscv::satp_t'(csr_wdata);
+                     // intercept SATP writes if in S-Mode and TVM is enabled
+                     if (priv_lvl_o == riscv::PRIV_LVL_S && mstatus_q.tvm)
+                         update_access_exception = 1'b1;
+-                    else begin
+-                        satp      = riscv::satp_t'(csr_wdata);
++                    // raise exception when S-Mode tries to disable virtual memory
++                    else if (priv_lvl_o == riscv::PRIV_LVL_S && satp_q.mode != riscv::ModeOff && satp.mode == riscv::ModeOff) begin
++                        satp_mode_exception = 1'b1;
++                    end else begin
+                         // only make ASID_LEN - 1 bit stick, that way software can figure out how many ASID bits are supported
+                         satp.asid = satp.asid & {{(riscv::ASIDW-AsidWidth){1'b0}}, {AsidWidth{1'b1}}};
+                         // only update if we actually support this mode
+@@ -523,7 +574,14 @@ module csr_regfile import ariane_pkg::*; #(
+                            (1 << riscv::ENV_CALL_UMODE) |
+                            (1 << riscv::INSTR_PAGE_FAULT) |
+                            (1 << riscv::LOAD_PAGE_FAULT) |
+-                           (1 << riscv::STORE_PAGE_FAULT);
++                           (1 << riscv::STORE_PAGE_FAULT)// |
++                       /*
++                       //Note commented out because we never want to delegate them.
++			               (1 << riscv::MPKEY_MISMATCH_FAULT) |
++			               (1 << riscv::ESMAP_MISMATCH_FAULT) |
++			               (1 << riscv::MEID_MISMATCH_FAULT) |
++                           (1 << riscv::ENC_INTEGRITY_FAULT) |
++                           (1 << riscv::SATP_MODE_CHANGE)*/;
+                     medeleg_d = (medeleg_q & ~mask) | (csr_wdata & mask);
+                 end
+                 // machine interrupt delegation register
+@@ -624,6 +682,21 @@ module csr_regfile import ariane_pkg::*; #(
+                 riscv::CSR_PMPADDR13:  if (!pmpcfg_q[13].locked && !(pmpcfg_q[14].locked && pmpcfg_q[14].addr_mode == riscv::TOR))  pmpaddr_d[13]  = csr_wdata[riscv::PLEN-3:0];
+                 riscv::CSR_PMPADDR14:  if (!pmpcfg_q[14].locked && !(pmpcfg_q[15].locked && pmpcfg_q[15].addr_mode == riscv::TOR))  pmpaddr_d[14]  = csr_wdata[riscv::PLEN-3:0];
+                 riscv::CSR_PMPADDR15:  if (!pmpcfg_q[15].locked)  pmpaddr_d[15]  = csr_wdata[riscv::PLEN-3:0];
++
++                riscv::CSR_U_TAG_MODE:          tag_mode_d         = riscv::tagmode_t'(csr_wdata[1:0]); // riscv::tagmode_t'(csr_wdata[1:0]);
++                riscv::CSR_U_TAG_SIZE:;         // read-only
++                riscv::CSR_U_TAG_STORAGE_BASE:  tag_storage_base_d = csr_wdata;
++                riscv::CSR_U_EAM:               eam_d              = riscv::eam_t'(csr_wdata[1:0]);
++                riscv::CSR_U_MEID:              meid_d             = csr_wdata[riscv::ASIDW-1:0];
++                riscv::CSR_U_TCS:               tcs_d              = csr_wdata;
++                riscv::CSR_U_TAG_CONTROL:       tag_control_d      = riscv::mtag_control_t'(csr_wdata[3:0]);
++                riscv::CSR_U_TAG_DRAM_BASE:     tag_dram_base_d    = csr_wdata[riscv::PPNW-1:0];
++`ifdef TAGMPK
++                riscv::CSR_U_MPKEY_CONFIG:      mpkey_config_d     = csr_wdata;
++`else
++                riscv::CSR_U_MPKEY_CONFIG:;
++`endif
++
+                 default: update_access_exception = 1'b1;
+             endcase
+         end
+@@ -956,6 +1029,11 @@ module csr_regfile import ariane_pkg::*; #(
+           csr_exception_o.cause = riscv::ILLEGAL_INSTR;
+           csr_exception_o.valid = 1'b1;
+         end
++
++        if (satp_mode_exception) begin
++            csr_exception_o.cause = riscv::SATP_MODE_CHANGE;
++            csr_exception_o.valid = 1'b1;
++        end
+     end
+ 
+     // -------------------
+@@ -1026,7 +1104,7 @@ module csr_regfile import ariane_pkg::*; #(
+         endcase
+     end
+ 
+-    // in debug mode we execute with privilege level M
++    // in ebug mode we execute with privilege level M
+     assign priv_lvl_o       = (debug_mode_q) ? riscv::PRIV_LVL_M : priv_lvl_q;
+     // FPU outputs
+     assign fflags_o         = fcsr_q.fflags;
+@@ -1036,6 +1114,20 @@ module csr_regfile import ariane_pkg::*; #(
+     assign satp_ppn_o       = satp_q.ppn;
+     assign asid_o           = satp_q.asid[AsidWidth-1:0];
+     assign sum_o            = mstatus_q.sum;
++
++    // memory tagging outputs -> LSU
++    assign tag_mode_o       = tag_mode_q;
++    assign tag_sto_base_o   = tag_storage_base_q;
++    assign tag_dram_base_o  = tag_dram_base_q;
++    assign eam_o            = eam_q;
++    assign meid_o           = meid_q;
++    assign tag_control_o    = tag_control_q;
++`ifdef TAGMPK
++    assign mpkey_config_o   = mpkey_config_q;
++`else
++    assign mpkey_config_o   = '0;
++`endif
++
+     // we support bare memory addressing and SV39
+     assign en_translation_o = (riscv::vm_mode_t'(satp_q.mode) == riscv::MODE_SV &&
+                                priv_lvl_o != riscv::PRIV_LVL_M)
+@@ -1109,6 +1201,19 @@ module csr_regfile import ariane_pkg::*; #(
+             // pmp
+             pmpcfg_q               <= '0;
+             pmpaddr_q              <= '0;
++
++            // memory tagging
++            tag_mode_q             <= riscv::MTAG0;
++            tag_storage_base_q     <= '0;
++            tag_dram_base_q        <= '0;
++            eam_q                  <= riscv::EAM_NORMAL;
++            meid_q                 <= '0;
++            tcs_q                  <= '0;
++            tag_control_q          <= '0;
++`ifdef TAGMPK
++            mpkey_config_q         <= '0;
++`endif
++
+         end else begin
+             priv_lvl_q             <= priv_lvl_d;
+             // floating-point registers
+@@ -1159,6 +1264,17 @@ module csr_regfile import ariane_pkg::*; #(
+                     pmpaddr_q[i] <= '0;
+                 end
+             end
++            // memory tagging
++            tag_mode_q             <= tag_mode_d;
++            tag_storage_base_q     <= tag_storage_base_d;
++            tag_dram_base_q        <= tag_dram_base_d;
++            eam_q                  <= eam_d;
++            meid_q                 <= meid_d;
++            tcs_q                  <= tcs_d;
++            tag_control_q          <= tag_control_d;
++`ifdef TAGMPK
++            mpkey_config_q         <= mpkey_config_d;
++`endif
+         end
+     end
+ 
+diff --git a/src/decoder.sv b/src/decoder.sv
+index e0c551e..4958d07 100644
+--- a/src/decoder.sv
++++ b/src/decoder.sv
+@@ -639,6 +639,21 @@ module decoder import ariane_pkg::*; (
+                     endcase
+                 end
+ 
++`ifdef MTAGDEBUG
++                riscv::OpcodeRXTLB: begin
++                    instruction_o.fu = TLBDEBUG;
++                    imm_select = IIMM;
++                    instruction_o.rs1[4:0] = instr.itype.rs1;
++                    instruction_o.rd[4:0]  = instr.itype.rd;
++                    // determine cache
++                    unique case (instr.itype.funct3)
++                        3'b011: instruction_o.op = ariane_pkg::RDTLB;
++                        3'b100: instruction_o.op = ariane_pkg::RITLB;
++                        default: illegal_instr = 1'b1;
++                    endcase
++                end
++`endif 
++
+                 // --------------------------------
+                 // Floating-Point Load/store
+                 // --------------------------------
+@@ -1003,6 +1018,20 @@ module decoder import ariane_pkg::*; (
+                     instruction_o.rd[4:0] = instr.utype.rd;
+                 end
+ 
++                `ifdef CUSTOM_FENCE
++                // Custom instructions
++                // FENCE.T
++                riscv::OpcodeCustom0: begin
++                    instruction_o.fu      = NONE;
++                    instruction_o.rs1     = '0;
++                    instruction_o.rs2     = '0;
++                    instruction_o.rd[4:0] = instr.utype.rd;
++                    imm_select            = UIMM;
++                    instruction_o.op      = ariane_pkg::FENCE_T;
++                    assert(instr.rtype.opcode == riscv::OpcodeCustom0);
++                 end
++                `endif
++
+                 default: illegal_instr = 1'b1;
+             endcase
+         end
+diff --git a/src/ex_stage.sv b/src/ex_stage.sv
+index 989476d..ab2f5ab 100644
+--- a/src/ex_stage.sv
++++ b/src/ex_stage.sv
+@@ -21,6 +21,9 @@ module ex_stage import ariane_pkg::*; #(
+     input  logic                                   clk_i,    // Clock
+     input  logic                                   rst_ni,   // Asynchronous reset active low
+     input  logic                                   flush_i,
++    `ifdef CUSTOM_FENCE
++    input  logic                                   flush_tlb_plru_tree_i,
++    `endif
+     input  logic                                   debug_mode_i,
+ 
+     input  logic [riscv::VLEN-1:0]                 rs1_forwarding_i,
+@@ -89,6 +92,15 @@ module ex_stage import ariane_pkg::*; #(
+     input  logic                                   mxr_i,
+     input  logic [riscv::PPNW-1:0]                 satp_ppn_i,
+     input  logic [ASID_WIDTH-1:0]                  asid_i,
++    // memory tagging CSR
++    input riscv::tagmode_t                         tag_mode_i,
++    input logic [riscv::XLEN-1:0]                  tag_sto_base_i,
++    input logic [riscv::PPNW-1:0]                  tag_dram_base_i,
++    input riscv::mpkey_config_t                    mpkey_config_i,
++    input riscv::eam_t                             eam_i,
++    input logic [ASID_WIDTH-1:0]                   meid_i,
++    input riscv::mtag_control_t                    tag_control_i,
++
+     // icache translation requests
+     input  icache_areq_o_t                         icache_areq_i,
+     output icache_areq_i_t                         icache_areq_o,
+@@ -96,6 +108,7 @@ module ex_stage import ariane_pkg::*; #(
+     // interface to dcache
+     input  dcache_req_o_t [2:0]                    dcache_req_ports_i,
+     output dcache_req_i_t [2:0]                    dcache_req_ports_o,
++    output dcache_req2_i_t [2:0]                   dcache_req2_ports_o,
+     input  logic                                   dcache_wbuffer_empty_i,
+     input  logic                                   dcache_wbuffer_not_ni_i,
+     output amo_req_t                               amo_req_o,          // request to cache subsytem
+@@ -148,6 +161,10 @@ module ex_stage import ariane_pkg::*; #(
+     fu_data_t alu_data;
+     assign alu_data = (alu_valid_i | branch_valid_i) ? fu_data_i  : '0;
+ 
++    //TODO unused for now:
++    //assign dcache_req2_ports_o[1] = '0;
++    //assign dcache_req2_ports_o[2] = '0;
++
+     alu alu_i (
+         .clk_i,
+         .rst_ni,
+@@ -278,6 +295,9 @@ module ex_stage import ariane_pkg::*; #(
+         .clk_i,
+         .rst_ni,
+         .flush_i,
++        `ifdef CUSTOM_FENCE
++        .flush_tlb_plru_tree_i,
++        `endif
+         .no_st_pending_o,
+         .fu_data_i             ( lsu_data ),
+         .lsu_ready_o,
+@@ -303,6 +323,13 @@ module ex_stage import ariane_pkg::*; #(
+         .mxr_i,
+         .satp_ppn_i,
+         .asid_i,
++        .tag_mode_i,
++        .tag_sto_base_i,
++        .tag_dram_base_i,
++        .mpkey_config_i,
++        .eam_i,
++        .meid_i,
++        .tag_control_i,
+         .asid_to_be_flushed_i (asid_to_be_flushed),
+         .vaddr_to_be_flushed_i (vaddr_to_be_flushed),
+         .flush_tlb_i,
+@@ -310,6 +337,7 @@ module ex_stage import ariane_pkg::*; #(
+         .dtlb_miss_o,
+         .dcache_req_ports_i,
+         .dcache_req_ports_o,
++        .dcache_req2_ports_o,
+         .dcache_wbuffer_empty_i,
+         .dcache_wbuffer_not_ni_i,
+         .amo_valid_commit_i,
+diff --git a/src/issue_read_operands.sv b/src/issue_read_operands.sv
+index f5da02d..5b43eff 100644
+--- a/src/issue_read_operands.sv
++++ b/src/issue_read_operands.sv
+@@ -134,7 +134,11 @@ module issue_read_operands import ariane_pkg::*; #(
+                 fu_busy = ~flu_ready_i;
+             FPU, FPU_VEC:
+                 fu_busy = ~fpu_ready_i;
++`ifdef MTAGDEBUG
++            LOAD, STORE, TLBDEBUG:
++`else
+             LOAD, STORE:
++`endif
+                 fu_busy = ~lsu_ready_i;
+             default:
+                 fu_busy = 1'b0;
+@@ -203,6 +207,7 @@ module issue_read_operands import ariane_pkg::*; #(
+         imm_n      = is_imm_fpr(issue_instr_i.op) ? {{riscv::XLEN-FLEN{1'b0}}, operand_c_regfile} : issue_instr_i.result;
+         trans_id_n = issue_instr_i.trans_id;
+         fu_n       = issue_instr_i.fu;
++
+         operator_n = issue_instr_i.op;
+         // or should we forward
+         if (forward_rs1) begin
+@@ -276,7 +281,11 @@ module issue_read_operands import ariane_pkg::*; #(
+                     fpu_fmt_q      <= orig_instr.rvftype.vfmt;         // vfmt bits from instruction
+                     fpu_rm_q       <= {2'b0, orig_instr.rvftype.repl}; // repl bit from instruction
+                 end
++`ifdef MTAGDEBUG
++                LOAD, STORE, TLBDEBUG:
++`else
+                 LOAD, STORE:
++`endif
+                     lsu_valid_q    <= 1'b1;
+                 CSR:
+                     csr_valid_q    <= 1'b1;
+diff --git a/src/load_store_unit.sv b/src/load_store_unit.sv
+index 1e7f2c3..699283a 100644
+--- a/src/load_store_unit.sv
++++ b/src/load_store_unit.sv
+@@ -36,7 +36,7 @@ module load_store_unit import ariane_pkg::*; #(
+     output riscv::xlen_t             store_result_o,
+     output logic                     store_valid_o,
+     output exception_t               store_exception_o,        // to WB, signal exception status ST exception
+-
++   
+     input  logic                     commit_i,                 // commit the pending store
+     output logic                     commit_ready_o,           // commit queue is ready to accept another commit request
+     input  logic [TRANS_ID_BITS-1:0] commit_tran_id_i,
+@@ -54,9 +54,20 @@ module load_store_unit import ariane_pkg::*; #(
+     input  logic                     mxr_i,                    // From CSR register file
+     input  logic [riscv::PPNW-1:0]   satp_ppn_i,               // From CSR register file
+     input  logic [ASID_WIDTH-1:0]    asid_i,                   // From CSR register file
++    input  riscv::tagmode_t          tag_mode_i,
++    input  logic [riscv::XLEN-1:0]   tag_sto_base_i,           // From CSR register file
++    input  logic [riscv::PPNW-1:0]   tag_dram_base_i,
++    input  riscv::mpkey_config_t     mpkey_config_i,
++    input  riscv::eam_t              eam_i,
++    input  logic [ASID_WIDTH-1:0]    meid_i,
++    input  riscv::mtag_control_t     tag_control_i,
++
+     input  logic [ASID_WIDTH-1:0]    asid_to_be_flushed_i,
+     input  logic [riscv::VLEN-1:0]   vaddr_to_be_flushed_i,
+     input  logic                     flush_tlb_i,
++    `ifdef CUSTOM_FENCE
++    input  logic                     flush_tlb_plru_tree_i,
++    `endif
+     // Performance counters
+     output logic                     itlb_miss_o,
+     output logic                     dtlb_miss_o,
+@@ -64,6 +75,7 @@ module load_store_unit import ariane_pkg::*; #(
+     // interface to dcache
+     input  dcache_req_o_t [2:0]      dcache_req_ports_i,
+     output dcache_req_i_t [2:0]      dcache_req_ports_o,
++    output dcache_req2_i_t [2:0]     dcache_req2_ports_o,
+     input  logic                     dcache_wbuffer_empty_i,
+     input  logic                     dcache_wbuffer_not_ni_i,
+     // AMO interface
+@@ -123,16 +135,40 @@ module load_store_unit import ariane_pkg::*; #(
+     logic [11:0]              page_offset;
+     logic                     page_offset_matches;
+ 
++`ifdef MTAGDEBUG
++    logic [63:0]              debug_tlb_pos;
++    logic                     debug_tag_off;
++    logic                     debug_ritlb;
++    logic                     debug_rdtlb;
++    logic [63:0]              debug_tag_o;
++    logic                     debug_ins;
++
++    assign debug_ins = debug_ritlb | debug_rdtlb;
++`endif
++
++
++`ifdef MTAGDEBUG
++    logic                     sr_ld_valid;
++    logic [TRANS_ID_BITS-1:0] sr_ld_trans_id;
++    logic [63:0]              sr_ld_result;
++    exception_t         sr_ld_ex;
++`endif
++
++
+     exception_t               misaligned_exception;
+     exception_t               ld_ex;
+     exception_t               st_ex;
+ 
++    //TODO unused for now
++    assign dcache_req2_ports_o[1] = '0;
++    assign dcache_req2_ports_o[2] = '0;
++
+     // -------------------
+     // MMU e.g.: TLBs/PTW
+     // -------------------
+     mmu #(
+-        .INSTR_TLB_ENTRIES      ( 16                     ),
+-        .DATA_TLB_ENTRIES       ( 16                     ),
++        .INSTR_TLB_ENTRIES      ( TLB_SIZE               ),
++        .DATA_TLB_ENTRIES       ( TLB_SIZE               ),
+         .ASID_WIDTH             ( ASID_WIDTH             ),
+         .ArianeCfg              ( ArianeCfg              )
+     ) i_mmu (
+@@ -149,6 +185,7 @@ module load_store_unit import ariane_pkg::*; #(
+         // connecting PTW to D$ IF
+         .req_port_i             ( dcache_req_ports_i [0] ),
+         .req_port_o             ( dcache_req_ports_o [0] ),
++        .req2_port_o            ( dcache_req2_ports_o [0] ),
+         // icache address translation requests
+         .icache_areq_i          ( icache_areq_i          ),
+         .asid_to_be_flushed_i,
+@@ -156,6 +193,20 @@ module load_store_unit import ariane_pkg::*; #(
+         .icache_areq_o          ( icache_areq_o          ),
+         .pmpcfg_i,
+         .pmpaddr_i,
++        // memory tagging / enclave stuff
++        .tag_mode_i             ( tag_mode_i             ), 
++        .mpkey_config_i         ( mpkey_config_i         ),
++        .eam_i                  ( eam_i                ),
++        .meid_i                 ( meid_i                 ),
++        .tag_sto_base_i         ( tag_sto_base_i         ),
++        .tag_dram_base_i        ( tag_dram_base_i        ),
++`ifdef MTAGDEBUG
++        .debug_tag_position_i   (debug_tlb_pos),
++        .debug_tag_offset_i     (debug_tag_off),
++        .debug_read_itlb_tag    (debug_ritlb),
++        .debug_read_dtlb_tag    (debug_rdtlb),
++        .debug_tlb_tag_o        (debug_tag_o),
++`endif
+         .*
+     );
+     logic store_buffer_empty;
+@@ -230,6 +281,7 @@ module load_store_unit import ariane_pkg::*; #(
+         .*
+     );
+ 
++
+     // ----------------------------
+     // Output Pipeline Register
+     // ----------------------------
+@@ -239,7 +291,11 @@ module load_store_unit import ariane_pkg::*; #(
+     ) i_pipe_reg_load (
+         .clk_i,
+         .rst_ni,
++`ifdef MTAGDEBUG
++        .d_i ( {sr_ld_valid, sr_ld_trans_id, sr_ld_result, sr_ld_ex} ),
++`else
+         .d_i ( {ld_valid, ld_trans_id, ld_result, ld_ex} ),
++`endif
+         .d_o ( {load_valid_o, load_trans_id_o, load_result_o, load_exception_o} )
+     );
+ 
+@@ -256,6 +312,18 @@ module load_store_unit import ariane_pkg::*; #(
+     // determine whether this is a load or store
+     always_comb begin : which_op
+ 
++`ifdef MTAGDEBUG
++        debug_tlb_pos = '0;
++        debug_tag_off = '0;
++        debug_rdtlb   = '0;
++        debug_ritlb   = '0;
++
++        sr_ld_valid = ld_valid;
++        sr_ld_trans_id = ld_trans_id;
++        sr_ld_result = ld_result;
++        sr_ld_ex = ld_ex;
++`endif
++
+         ld_valid_i = 1'b0;
+         st_valid_i = 1'b0;
+ 
+@@ -276,6 +344,34 @@ module load_store_unit import ariane_pkg::*; #(
+                 translation_req      = st_translation_req;
+                 mmu_vaddr            = st_vaddr;
+             end
++`ifdef MTAGDEBUG
++            TLBDEBUG: begin
++                debug_tlb_pos       = fu_data_i.operand_a; 
++                debug_tag_off       = fu_data_i.imm;
++                case (fu_data_i.operator)
++                    ariane_pkg::RDTLB: begin
++                        debug_rdtlb = 1'b1;
++                    end
++                    ariane_pkg::RITLB: begin
++                        debug_ritlb = 1'b1;
++                    end
++                endcase
++               sr_ld_valid = 1'b1;
++                sr_ld_trans_id = fu_data_i.trans_id;
++                sr_ld_result = debug_tag_o;
++                sr_ld_ex = 0;
++               /* 
++                $display("TLBDEBUG: fu(\n");
++                $display("  fu:  %x\n", fu_data_i.fu);
++                $display("  op:  %x\n", fu_data_i.operator);
++                $display("  opa: %x\n", fu_data_i.operand_a);
++                $display("  opb: %x\n", fu_data_i.operand_b);
++                $display("  imm: %x\n", fu_data_i.imm);
++                $display("  tid: %x\n", fu_data_i.trans_id);
++                $display(")\n");
++                */
++            end
++`endif
+             // not relevant for the LSU
+             default: ;
+         endcase
+@@ -392,6 +488,9 @@ module load_store_unit import ariane_pkg::*; #(
+ 
+         .lsu_ctrl_o         ( lsu_ctrl    ),
+         .ready_o            ( lsu_ready_o ),
++`ifdef MTAGDEBUG
++        .tlb_debug_i        ( debug_ins   ), 
++`endif
+         .*
+     );
+ 
+@@ -418,7 +517,12 @@ module lsu_bypass import ariane_pkg::*; (
+     input  logic      pop_st_i,
+ 
+     output lsu_ctrl_t lsu_ctrl_o,
++`ifdef MTAGDEBUG
++    output logic      ready_o,
++    input  logic      tlb_debug_i 
++`else
+     output logic      ready_o
++`endif
+     );
+ 
+     lsu_ctrl_t [1:0] mem_n, mem_q;
+@@ -441,7 +545,11 @@ module lsu_bypass import ariane_pkg::*; (
+ 
+         mem_n = mem_q;
+         // we've got a valid LSU request
++`ifdef MTAGDEBUG
++        if (lus_req_valid_i && ~tlb_debug_i) begin
++`else
+         if (lus_req_valid_i) begin
++`endif
+             mem_n[write_pointer_q] = lsu_req_i;
+             write_pointer++;
+             status_cnt++;
+diff --git a/src/mmu.sv b/src/mmu.sv
+index f98fdef..d0ad26d 100644
+--- a/src/mmu.sv
++++ b/src/mmu.sv
+@@ -7,7 +7,7 @@
+ // this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ // CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ // specific language governing permissions and limitations under the License.
+-//
++
+ // Author: Florian Zaruba, ETH Zurich
+ // Date: 19/04/2017
+ // Description: Memory Management Unit for Ariane, contains TLB and
+@@ -55,45 +55,118 @@ module mmu import ariane_pkg::*; #(
+     input logic [ASID_WIDTH-1:0]            asid_to_be_flushed_i,
+     input logic [riscv::VLEN-1:0]           vaddr_to_be_flushed_i,
+     input logic                             flush_tlb_i,
++    `ifdef CUSTOM_FENCE
++    input logic                             flush_tlb_plru_tree_i,
++    `endif
+     // Performance counters
+     output logic                            itlb_miss_o,
+     output logic                            dtlb_miss_o,
+     // PTW memory interface
+     input  dcache_req_o_t                   req_port_i,
+     output dcache_req_i_t                   req_port_o,
++    output dcache_req2_i_t                  req2_port_o,
+     // PMP
+     input  riscv::pmpcfg_t [15:0]           pmpcfg_i,
+-    input  logic [15:0][riscv::PLEN-3:0]    pmpaddr_i
++    input  logic [15:0][riscv::PLEN-3:0]    pmpaddr_i,
++    // memory tagging
++    input  riscv::tagmode_t                 tag_mode_i,
++    input  riscv::mpkey_config_t            mpkey_config_i,
++    input  riscv::eam_t                     eam_i,
++    input  logic [ASID_WIDTH-1:0]           meid_i,
++    input  riscv::mtag_control_t            tag_control_i,
++
++`ifdef MTAGDEBUG
++    input  logic [riscv::XLEN-1:0]          tag_sto_base_i,
++    input  logic [riscv::PPNW-1:0]          tag_dram_base_i,
++    input logic  [63:0]                     debug_tag_position_i,
++    input logic                             debug_tag_offset_i,
++    input logic                             debug_read_itlb_tag,
++    input logic                             debug_read_dtlb_tag,
++    output logic [63:0]                     debug_tlb_tag_o
++`else
++    input  logic [riscv::XLEN-1:0]          tag_sto_base_i,
++    input  logic [riscv::PPNW-1:0]          tag_dram_base_i
++`endif     
+ );
+ 
+     logic                   iaccess_err;   // insufficient privilege to access this instruction page
+     logic                   daccess_err;   // insufficient privilege to access this data page
++    logic                   dtlb_mpkey_mismatch_err;
++    //logic                   dtlb_esmap_mismatch_err;
++    //logic                   dtlb_meid_mismatch_err;
++    logic                   dtlb_enclave_acc_err;
++    logic                   dtlb_imm_st_err;
++    logic                   dtlb_hpce_err;
++    logic                   itlb_mpkey_mismatch_err;
++    //logic                   itlb_esmap_mismatch_err;
++    //logic                   itlb_meid_mismatch_err;
++    logic                   itlb_enclave_acc_err;
++    logic                   itlb_hpce_err;
+     logic                   ptw_active;    // PTW is currently walking a page table
+     logic                   walking_instr; // PTW is walking because of an ITLB miss
+     logic                   ptw_error;     // PTW threw an exception
+     logic                   ptw_access_exception; // PTW threw an access exception (PMPs)
++    logic                   ptw_encl_access_exception;
+     logic [riscv::PLEN-1:0] ptw_bad_paddr; // PTW PMP exception bad physical addr
+ 
++    logic                   dtlb_access_allowed;
++    logic                   itlb_access_allowed;
++    logic                   inside_enclave;
++    assign inside_enclave = |meid_i; //meid != 0
++
+     logic [riscv::VLEN-1:0] update_vaddr;
+     tlb_update_t update_ptw_itlb, update_ptw_dtlb;
+ 
+-    logic        itlb_lu_access;
+-    riscv::pte_t itlb_content;
+-    logic        itlb_is_2M;
+-    logic        itlb_is_1G;
+-    logic        itlb_lu_hit;
+-
+-    logic        dtlb_lu_access;
+-    riscv::pte_t dtlb_content;
+-    logic        dtlb_is_2M;
+-    logic        dtlb_is_1G;
+-    logic        dtlb_lu_hit;
+-
++    logic         itlb_lu_access;
++    riscv::pte_t  itlb_content;
++    logic         itlb_is_2M;
++    logic         itlb_is_1G;
++    logic         itlb_lu_hit;
++
++    logic         dtlb_lu_access;
++    riscv::pte_t  dtlb_content;
++    logic         dtlb_is_2M;
++    logic         dtlb_is_1G;
++    logic         dtlb_lu_hit;
++
++    logic         dtlb_e;
++    logic         itlb_e;
++
++    logic         dtlb_hpce;
++    logic         itlb_hpce;
++
++    logic         dtlb_imm;
++    logic         itlb_imm;
++
++`ifdef TAGMPK
++    `ifdef INCLUDE_FUTURE
++        logic [93:0] dtlb_future; 
++        logic [93:0] itlb_future; 
++    `endif
++`else
++    `ifdef INCLUDE_FUTURE
++        logic [103:0] dtlb_future; 
++        logic [103:0] itlb_future; 
++    `endif
++`endif
++
++
++    logic [ASID_WIDTH-1:0] dtlb_id;
++    logic [ASID_WIDTH-1:0] itlb_id;
++
++`ifdef MTAGDEBUG
++    logic  [63:0] debug_dtlb_tag_o;
++    logic  [63:0] debug_itlb_tag_o;
++    assign debug_tlb_tag_o = debug_read_itlb_tag ? debug_itlb_tag_o : debug_dtlb_tag_o;
++`endif
+ 
+     // Assignments
+     assign itlb_lu_access = icache_areq_i.fetch_req;
+     assign dtlb_lu_access = lsu_req_i;
+ 
++    // everything related to memory tags is only enabled when the CSR for the tag storage base address is not 0
++    logic  disable_tag;
++    assign disable_tag = tag_mode_i == riscv::MTAG0;
+ 
+     tlb #(
+         .TLB_ENTRIES      ( INSTR_TLB_ENTRIES          ),
+@@ -102,7 +175,9 @@ module mmu import ariane_pkg::*; #(
+         .clk_i            ( clk_i                      ),
+         .rst_ni           ( rst_ni                     ),
+         .flush_i          ( flush_tlb_i                ),
+-
++        `ifdef CUSTOM_FENCE
++        .flush_tlb_plru_tree_i ( flush_tlb_plru_tree_i ),
++        `endif
+         .update_i         ( update_ptw_itlb            ),
+ 
+         .lu_access_i      ( itlb_lu_access             ),
+@@ -111,10 +186,26 @@ module mmu import ariane_pkg::*; #(
+         .vaddr_to_be_flushed_i ( vaddr_to_be_flushed_i ),
+         .lu_vaddr_i       ( icache_areq_i.fetch_vaddr  ),
+         .lu_content_o     ( itlb_content               ),
+-
++        .e_o              ( itlb_e                     ),
++        .imm_o            ( itlb_imm                   ),
++        .hpce_o           ( itlb_hpce                  ),
++        .id_o             ( itlb_id                    ),
+         .lu_is_2M_o       ( itlb_is_2M                 ),
+         .lu_is_1G_o       ( itlb_is_1G                 ),
++        .tag_mode_i       ( tag_mode_i                 ),
++        .meid_i           ( meid_i                     ),
++`ifdef INCLUDE_FUTURE
++        .future_o         ( itlb_future                ),
++`endif
++`ifdef MTAGDEBUG
++        .lu_hit_o         ( itlb_lu_hit                ),
++        .debug_tag_position_i ( debug_tag_position_i   ),
++        .debug_tag_offset_i ( debug_tag_offset_i       ),
++        .debug_read_tag_i ( debug_read_itlb_tag        ),
++        .debug_tag_o      ( debug_itlb_tag_o           )
++`else
+         .lu_hit_o         ( itlb_lu_hit                )
++`endif
+     );
+ 
+     tlb #(
+@@ -124,7 +215,9 @@ module mmu import ariane_pkg::*; #(
+         .clk_i            ( clk_i                       ),
+         .rst_ni           ( rst_ni                      ),
+         .flush_i          ( flush_tlb_i                 ),
+-
++        `ifdef CUSTOM_FENCE
++        .flush_tlb_plru_tree_i( flush_tlb_plru_tree_i   ),
++        `endif
+         .update_i         ( update_ptw_dtlb             ),
+ 
+         .lu_access_i      ( dtlb_lu_access              ),
+@@ -133,10 +226,26 @@ module mmu import ariane_pkg::*; #(
+ 	      .vaddr_to_be_flushed_i ( vaddr_to_be_flushed_i  ),
+         .lu_vaddr_i       ( lsu_vaddr_i                 ),
+         .lu_content_o     ( dtlb_content                ),
+-
++        .e_o              ( dtlb_e                      ),
++        .imm_o            ( dtlb_imm                    ),
++        .hpce_o           ( dtlb_hpce                   ),
++        .id_o             ( dtlb_id                     ),
+         .lu_is_2M_o       ( dtlb_is_2M                  ),
+         .lu_is_1G_o       ( dtlb_is_1G                  ),
++        .tag_mode_i       ( tag_mode_i                  ),
++        .meid_i           ( meid_i                      ),
++`ifdef INCLUDE_FUTURE
++        .future_o         ( dtlb_future                ),
++`endif
++`ifdef MTAGDEBUG
++        .lu_hit_o         ( dtlb_lu_hit                 ),
++        .debug_tag_position_i ( debug_tag_position_i   ),
++        .debug_tag_offset_i ( debug_tag_offset_i       ),
++        .debug_read_tag_i ( debug_read_dtlb_tag        ),
++        .debug_tag_o      ( debug_dtlb_tag_o           )
++`else
+         .lu_hit_o         ( dtlb_lu_hit                 )
++`endif
+     );
+ 
+ 
+@@ -150,6 +259,7 @@ module mmu import ariane_pkg::*; #(
+         .walking_instr_o        ( walking_instr         ),
+         .ptw_error_o            ( ptw_error             ),
+         .ptw_access_exception_o ( ptw_access_exception  ),
++        .encl_access_exception_o( ptw_encl_access_exception ),
+         .enable_translation_i   ( enable_translation_i  ),
+ 
+         .update_vaddr_o         ( update_vaddr          ),
+@@ -166,6 +276,11 @@ module mmu import ariane_pkg::*; #(
+ 
+         .req_port_i             ( req_port_i            ),
+         .req_port_o             ( req_port_o            ),
++        .req2_port_o            ( req2_port_o           ),
++        .inside_enclave_i       ( inside_enclave        ),
++        .tag_mode_i             ( tag_mode_i            ),
++        .tag_sto_base_i         ( tag_sto_base_i        ),
++        .tag_dram_base_i        ( tag_dram_base_i       ),
+         .pmpcfg_i,
+         .pmpaddr_i,
+         .bad_paddr_o            ( ptw_bad_paddr         ),
+@@ -210,6 +325,56 @@ module mmu import ariane_pkg::*; #(
+         iaccess_err   = icache_areq_i.fetch_req && (((priv_lvl_i == riscv::PRIV_LVL_U) && ~itlb_content.u)
+                                                  || ((priv_lvl_i == riscv::PRIV_LVL_S) && itlb_content.u));
+ 
++`ifdef TAGMPK
++        itlb_mpkey_mismatch_err = (!disable_tag) && 
++                                  (tag_mode_i == riscv::MTAG128) && 
++                                  (!tag_control_i.disable_tag_compare_checks) &&  
++                                  (itlb_content.reserved != mpkey_config_i.slot_0_mpkey) &&
++                                  (itlb_content.reserved != mpkey_config_i.slot_1_mpkey) && 
++                                  (itlb_content.reserved != mpkey_config_i.slot_2_mpkey) && 
++                                  (itlb_content.reserved != mpkey_config_i.slot_3_mpkey) &&  
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++`else
++        itlb_mpkey_mismatch_err = 0;
++`endif
++
++        itlb_access_allowed     = 
++        `ifdef TAGMPK
++            `ifdef INCLUDE_FUTURE
++                                  (itlb_future == 94'b0) &&
++            `endif
++        `else
++            `ifdef INCLUDE_FUTURE
++                                  (itlb_future == 104'b0) &&
++            `endif
++        `endif
++                                  ((!inside_enclave && !itlb_e) || /*not in E and page is not E */
++                                  (inside_enclave && itlb_e && meid_i == itlb_id)); /* in E, and page is E, and EID is same */
++
++        itlb_enclave_acc_err    = (!disable_tag) &&
++                                  (!tag_control_i.disable_tag_compare_checks) &&
++                                  (!itlb_access_allowed) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++        /* 
++        itlb_esmap_mismatch_err = (!disable_tag) &&  
++                                  (!tag_control_i.disable_tag_compare_checks) && 
++                                  (itlb_e_q) && 
++                                  ~((meid_i != {ASID_WIDTH{1'b0}}) && (esmap_i || icache_areq_i.fetch_req)) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++
++        itlb_meid_mismatch_err  = (!disable_tag) &&  
++                                  (!tag_control_i.disable_tag_compare_checks) &&
++                                  (itlb_e_q) &&
++                                  (meid_i != {ASID_WIDTH{1'b0}}) && 
++                                  (esmap_i || icache_areq_i.fetch_req) &&
++                                  (meid_i  != itlb_id_q) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M); 
++        */
++        itlb_hpce_err           = (!disable_tag) &&
++                                  (itlb_hpce) &&
++                                  (itlb_is_2M) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++
+         // MMU enabled: address from TLB, request delayed until hit. Error when TLB
+         // hit and no access right or TLB hit and translated address not valid (e.g.
+         // AXI decode error), or when PTW performs walk due to ITLB miss and raises
+@@ -245,6 +410,16 @@ module mmu import ariane_pkg::*; #(
+                     icache_areq_o.fetch_exception = {riscv::INSTR_PAGE_FAULT, {{riscv::XLEN-riscv::VLEN{1'b0}}, icache_areq_i.fetch_vaddr}, 1'b1};
+                 end else if (!pmp_instr_allow) begin
+                     icache_areq_o.fetch_exception = {riscv::INSTR_ACCESS_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, icache_areq_i.fetch_vaddr}, 1'b1};
++                end else if (itlb_mpkey_mismatch_err) begin
++                    icache_areq_o.fetch_exception = {riscv::MPKEY_MISMATCH_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, icache_areq_i.fetch_vaddr}, 1'b1};
++                /* 
++                end else if (itlb_esmap_mismatch_err) begin
++                    icache_areq_o.fetch_exception = {riscv::ESMAP_MISMATCH_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, icache_areq_i.fetch_vaddr}, 1'b1};
++                end else if (itlb_meid_mismatch_err) begin
++                    icache_areq_o.fetch_exception = {riscv::MEID_MISMATCH_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, icache_areq_i.fetch_vaddr}, 1'b1};
++                */ 
++                end else if (itlb_enclave_acc_err) begin
++                    icache_areq_o.fetch_exception = {riscv::ENCLAVE_ACCESS_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, icache_areq_i.fetch_vaddr}, 1'b1};
+                 end
+             end else
+             // ---------
+@@ -252,10 +427,12 @@ module mmu import ariane_pkg::*; #(
+             // ---------
+             // watch out for exceptions happening during walking the page table
+             if (ptw_active && walking_instr) begin
+-                icache_areq_o.fetch_valid = ptw_error | ptw_access_exception;
+-                if (ptw_error) icache_areq_o.fetch_exception = {riscv::INSTR_PAGE_FAULT, {{riscv::XLEN-riscv::VLEN{1'b0}}, update_vaddr}, 1'b1};
++                icache_areq_o.fetch_valid = ptw_error | ptw_access_exception | ptw_encl_access_exception;
++                if (ptw_error)                      icache_areq_o.fetch_exception = {riscv::INSTR_PAGE_FAULT, {{riscv::XLEN-riscv::VLEN{1'b0}}, update_vaddr}, 1'b1};
++                else if (ptw_encl_access_exception) icache_areq_o.fetch_exception = {riscv::ENC_INTEGRITY_FAULT, {{riscv::XLEN-riscv::VLEN{1'b0}}, update_vaddr}, 1'b1}; 
++                // this should never happen since fetches don't write anything
+                 // TODO(moschn,zarubaf): What should the value of tval be in this case?
+-                else icache_areq_o.fetch_exception = {riscv::INSTR_ACCESS_FAULT, {{riscv::XLEN-riscv::VLEN{1'b0}}, ptw_bad_paddr}, 1'b1};
++                else                                icache_areq_o.fetch_exception = {riscv::INSTR_ACCESS_FAULT, {{riscv::XLEN-riscv::VLEN{1'b0}}, ptw_bad_paddr}, 1'b1};
+             end
+         end
+         // if it didn't match any execute region throw an `Instruction Access Fault`
+@@ -288,7 +465,12 @@ module mmu import ariane_pkg::*; #(
+     // Data Interface
+     //-----------------------
+     logic [riscv::VLEN-1:0] lsu_vaddr_n,     lsu_vaddr_q;
+-    riscv::pte_t dtlb_pte_n,      dtlb_pte_q;
++    riscv::pte_t            dtlb_pte_n,      dtlb_pte_q;
++    logic [ASID_WIDTH-1:0]  dtlb_id_n,       dtlb_id_q;
++    logic                   dtlb_e_n,        dtlb_e_q;
++    logic                   dtlb_imm_n,      dtlb_imm_q;
++    logic                   dtlb_hpce_n,     dtlb_hpce_q;
++
+     exception_t  misaligned_ex_n, misaligned_ex_q;
+     logic        lsu_req_n,       lsu_req_q;
+     logic        lsu_is_store_n,  lsu_is_store_q;
+@@ -310,11 +492,16 @@ module mmu import ariane_pkg::*; #(
+         lsu_req_n             = lsu_req_i;
+         misaligned_ex_n       = misaligned_ex_i;
+         dtlb_pte_n            = dtlb_content;
++        dtlb_id_n             = dtlb_id;
+         dtlb_hit_n            = dtlb_lu_hit;
+         lsu_is_store_n        = lsu_is_store_i;
+         dtlb_is_2M_n          = dtlb_is_2M;
+         dtlb_is_1G_n          = dtlb_is_1G;
+ 
++        dtlb_e_n              = dtlb_e;
++        dtlb_imm_n            = dtlb_imm;
++        dtlb_hpce_n           = dtlb_hpce;
++
+         lsu_paddr_o           = lsu_vaddr_q[riscv::PLEN-1:0];
+         lsu_dtlb_ppn_o        = lsu_vaddr_n[riscv::PLEN-1:12];
+         lsu_valid_o           = lsu_req_q;
+@@ -328,6 +515,72 @@ module mmu import ariane_pkg::*; #(
+         // if SUM is enabled
+         daccess_err = (ld_st_priv_lvl_i == riscv::PRIV_LVL_S && !sum_i && dtlb_pte_q.u) || // SUM is not set and we are trying to access a user page in supervisor mode
+                       (ld_st_priv_lvl_i == riscv::PRIV_LVL_U && !dtlb_pte_q.u);            // this is not a user page but we are in user mode and trying to access it
++
++`ifdef TAGMPK
++        dtlb_mpkey_mismatch_err = (!disable_tag) && 
++                                  (tag_mode_i == riscv::MTAG128) && 
++                                  (!tag_control_i.disable_tag_compare_checks) &&
++                                  (dtlb_pte_q.reserved != mpkey_config_i.slot_0_mpkey) &&
++                                  (dtlb_pte_q.reserved != mpkey_config_i.slot_1_mpkey) && 
++                                  (dtlb_pte_q.reserved != mpkey_config_i.slot_2_mpkey) && 
++                                  (dtlb_pte_q.reserved != mpkey_config_i.slot_3_mpkey) &&  
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++`else
++        dtlb_mpkey_mismatch_err = 0;
++`endif
++
++        /*
++        dtlb_esmap_mismatch_err = (!disable_tag) &&
++                                  (!tag_control_i.disable_tag_compare_checks) &&
++                                  dtlb_e_q && 
++                                  ~((meid_i != {ASID_WIDTH{1'b0}}) && esmap_i) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++        */
++
++        dtlb_access_allowed     = 
++        `ifdef TAGMPK
++            `ifdef INCLUDE_FUTURE
++                                  (dtlb_future == 94'b0) &&
++            `endif
++        `else
++            `ifdef INCLUDE_FUTURE
++                                  (dtlb_future == 104'b0) &&
++            `endif
++        `endif
++                                  ((!inside_enclave && !dtlb_e_q) || /*not in E and page is not E */
++                                  (inside_enclave  && dtlb_e_q  && eam_i == riscv::EAM_ENCLAVE && meid_i == dtlb_id_q) || /* in E, and page is E, and EID is same, and EAM is EAM_ENCLAVE */
++                                  (inside_enclave  && !dtlb_e_q && eam_i == riscv::EAM_NORMAL)); /*in E, page is not E, EAM is EAM_NORMAL */
++
++        dtlb_enclave_acc_err    = (!disable_tag) &&
++                                  (!tag_control_i.disable_tag_compare_checks) &&
++                                  (!dtlb_access_allowed) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++        
++        /*
++        dtlb_esmap_mismatch_err = (!disable_tag) && 
++                                  ~(dtlb_e_q == ((meid_i != {ASID_WIDTH{1'b0}}) && esmap_i)) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++        dtlb_meid_mismatch_err  = (!disable_tag) &&  
++                                  (!tag_control_i.disable_tag_compare_checks) &&
++                                  dtlb_e_q &&
++                                  ((meid_i != {ASID_WIDTH{1'b0}}) && esmap_i) &&
++                                  (meid_i  != dtlb_id_q) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M); 
++        dtlb_meid_mismatch_err =  (!disable_tag) && 
++                                  (dtlb_e_q == ((meid_i != {ASID_WIDTH{1'b0}}) && esmap_i)) &&
++                                  (meid_i != dtlb_id_q) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++        */
++        dtlb_imm_st_err         = (!disable_tag) &&
++                                  (!tag_control_i.disable_imm_write_checks) &&
++                                  (lsu_is_store_q && dtlb_imm_q) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++
++        dtlb_hpce_err           = (!disable_tag) &&
++                                  (dtlb_hpce_q) &&
++                                  (dtlb_is_2M_q) &&
++                                  (ld_st_priv_lvl_i != riscv::PRIV_LVL_M);
++
+         // translation is enabled and no misaligned exception occurred
+         if (en_ld_st_translation_i && !misaligned_ex_q.valid) begin
+             lsu_valid_o = 1'b0;
+@@ -346,7 +599,7 @@ module mmu import ariane_pkg::*; #(
+             end
+             // ---------
+             // DTLB Hit
+-            // --------
++            // ---------
+             if (dtlb_hit_q && lsu_req_q) begin
+                 lsu_valid_o = 1'b1;
+                 // exception priority:
+@@ -363,6 +616,30 @@ module mmu import ariane_pkg::*; #(
+                     // Check if any PMPs are violated
+                     end else if (!pmp_data_allow) begin
+                         lsu_exception_o = {riscv::ST_ACCESS_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, lsu_paddr_o}, 1'b1};
++                    end else if (dtlb_imm_st_err) begin
++                        // TODO: change to IMM_ST_FAULT
++                        lsu_exception_o = {riscv::ENCLAVE_ACCESS_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    end else if (dtlb_mpkey_mismatch_err) begin
++                        lsu_exception_o = {riscv::MPKEY_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++`ifdef TAGMPK
++                    end else if ((!disable_tag) && (tag_mode_i == riscv::MTAG128) &&
++                                 (!tag_control_i.disable_tag_compare_checks) &&
++                                 ((dtlb_pte_q.reserved == mpkey_config_i.slot_0_mpkey && mpkey_config_i.slot_0_wd == 1'b1) ||
++                                  (dtlb_pte_q.reserved == mpkey_config_i.slot_1_mpkey && mpkey_config_i.slot_1_wd == 1'b1) ||
++                                  (dtlb_pte_q.reserved == mpkey_config_i.slot_2_mpkey && mpkey_config_i.slot_2_wd == 1'b1) ||
++                                  (dtlb_pte_q.reserved == mpkey_config_i.slot_3_mpkey && mpkey_config_i.slot_3_wd == 1'b1))) begin
++                        lsu_exception_o = {riscv::MPKEY_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++`endif
++                    /*
++                    end else if (dtlb_esmap_mismatch_err) begin
++                        lsu_exception_o = {riscv::ESMAP_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    end else if (dtlb_meid_mismatch_err) begin
++                        lsu_exception_o = {riscv::MEID_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    */ 
++                    end else if (dtlb_enclave_acc_err) begin
++                        lsu_exception_o = {riscv::ENCLAVE_ACCESS_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    end else if (dtlb_hpce_err) begin
++                        lsu_exception_o = {riscv::HPCE_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
+                     end
+ 
+                 // this is a load
+@@ -373,6 +650,18 @@ module mmu import ariane_pkg::*; #(
+                     // Check if any PMPs are violated
+                     end else if (!pmp_data_allow) begin
+                         lsu_exception_o = {riscv::LD_ACCESS_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, lsu_paddr_o}, 1'b1};
++                    end else if (dtlb_mpkey_mismatch_err) begin
++                        lsu_exception_o = {riscv::MPKEY_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    /* 
++                    end else if (dtlb_esmap_mismatch_err) begin
++                        lsu_exception_o = {riscv::ESMAP_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    end else if (dtlb_meid_mismatch_err) begin
++                        lsu_exception_o = {riscv::MEID_MISMATCH_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    */ 
++                    end else if (dtlb_enclave_acc_err) begin
++                        lsu_exception_o = {riscv::ENCLAVE_ACCESS_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                    end else if (dtlb_hpce_err) begin
++                        lsu_exception_o = {riscv::HPCE_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
+                     end
+                 end
+             end else
+@@ -400,6 +689,12 @@ module mmu import ariane_pkg::*; #(
+                     // the page table walker can only throw page faults
+                     lsu_exception_o = {riscv::LD_ACCESS_FAULT, {{riscv::XLEN-riscv::PLEN{1'b0}}, ptw_bad_paddr}, 1'b1};
+                 end
++
++                // access to an enclave page was faulty
++                if (ptw_encl_access_exception) begin
++                    lsu_exception_o = {riscv::ENC_INTEGRITY_FAULT, {{riscv::XLEN-riscv::VLEN{lsu_vaddr_q[riscv::VLEN-1]}},lsu_vaddr_q}, 1'b1};
++                end
++               
+             end
+         end
+         // If translation is not enabled, check the paddr immediately against PMPs
+@@ -412,6 +707,7 @@ module mmu import ariane_pkg::*; #(
+         end
+     end
+ 
++
+     // Load/store PMP check
+     pmp #(
+         .PLEN       ( riscv::PLEN            ),
+@@ -436,19 +732,27 @@ module mmu import ariane_pkg::*; #(
+             lsu_req_q        <= '0;
+             misaligned_ex_q  <= '0;
+             dtlb_pte_q       <= '0;
++            dtlb_id_q        <= '0;
+             dtlb_hit_q       <= '0;
+             lsu_is_store_q   <= '0;
+             dtlb_is_2M_q     <= '0;
+             dtlb_is_1G_q     <= '0;
++            dtlb_e_q         <= '0;
++            dtlb_imm_q       <= '0;
++            dtlb_hpce_q      <= '0;
+         end else begin
+             lsu_vaddr_q      <=  lsu_vaddr_n;
+             lsu_req_q        <=  lsu_req_n;
+             misaligned_ex_q  <=  misaligned_ex_n;
+             dtlb_pte_q       <=  dtlb_pte_n;
++            dtlb_id_q        <=  dtlb_id_n;
+             dtlb_hit_q       <=  dtlb_hit_n;
+             lsu_is_store_q   <=  lsu_is_store_n;
+             dtlb_is_2M_q     <=  dtlb_is_2M_n;
+             dtlb_is_1G_q     <=  dtlb_is_1G_n;
++            dtlb_e_q         <=  dtlb_e_n;
++            dtlb_imm_q       <=  dtlb_imm_n;
++            dtlb_hpce_q      <=  dtlb_hpce_n;
+         end
+     end
+ endmodule
+diff --git a/src/ptw.sv b/src/ptw.sv
+index 493c6a9..705f715 100644
+--- a/src/ptw.sv
++++ b/src/ptw.sv
+@@ -28,6 +28,7 @@ module ptw import ariane_pkg::*; #(
+     output logic                    walking_instr_o,        // set when walking for TLB
+     output logic                    ptw_error_o,            // set when an error occurred
+     output logic                    ptw_access_exception_o, // set when an PMP access exception occured
++    output logic                    encl_access_exception_o, // set when an enclave access error occured
+     input  logic                    enable_translation_i,   // CSRs indicate to enable SV39
+     input  logic                    en_ld_st_translation_i, // enable virtual memory translation for load/stores
+ 
+@@ -35,7 +36,13 @@ module ptw import ariane_pkg::*; #(
+     // PTW memory interface
+     input  dcache_req_o_t           req_port_i,
+     output dcache_req_i_t           req_port_o,
++    output dcache_req2_i_t          req2_port_o,
++    input  logic                    inside_enclave_i,
+ 
++    input  riscv::tagmode_t         tag_mode_i,
++    input  logic [riscv::XLEN-1:0]  tag_sto_base_i,
++    input  logic [riscv::PPNW-1:0]  tag_dram_base_i,
++    input  riscv::mtag_control_t    tag_control_i,
+ 
+     // to TLBs, update logic
+     output tlb_update_t             itlb_update_o,
+@@ -60,27 +67,36 @@ module ptw import ariane_pkg::*; #(
+     output logic                    itlb_miss_o,
+     output logic                    dtlb_miss_o,
+     // PMP
+-
++    input riscv::priv_lvl_t         priv_lvl_i, 
+     input  riscv::pmpcfg_t [15:0]   pmpcfg_i,
+     input  logic [15:0][riscv::PLEN-3:0] pmpaddr_i,
+     output logic [riscv::PLEN-1:0]  bad_paddr_o
+-
+ );
+ 
+     // input registers
+     logic data_rvalid_q;
+     logic [63:0] data_rdata_q;
+ 
++    riscv::pte_t pte_q, pte_n;
++
+     riscv::pte_t pte;
+     assign pte = riscv::pte_t'(data_rdata_q);
+ 
+-    enum logic[2:0] {
++    riscv::mtag_t tag;
++    assign tag = riscv::mtag_t'({64'b0, data_rdata_q}); //Note the lower 64 bits are the fetched tag data
++
++    logic [riscv::PLEN-1:0] mtag_paddr;
++
++    enum logic[3:0] {
+       IDLE,
+       WAIT_GRANT,
++      TAG_LOOKUP,
++      TAG_FINAL,
+       PTE_LOOKUP,
+       WAIT_RVALID,
+       PROPAGATE_ERROR,
+-      PROPAGATE_ACCESS_ERROR
++      PROPAGATE_ACCESS_ERROR,
++      PROPAGATE_ENC_ERROR
+     } state_q, state_d;
+ 
+     // SV39 defines three levels of page tables
+@@ -100,23 +116,94 @@ module ptw import ariane_pkg::*; #(
+     // 4 byte aligned physical pointer
+     logic [riscv::PLEN-1:0] ptw_pptr_q, ptw_pptr_n;
+ 
++    logic                       last_level_q, last_level_n;
++    
++    // register for tag value
++    logic                       read_tag_q, read_tag_n;
++    logic                       tag_offset_q, tag_offset_n;
++    logic                       tag_first_q, tag_first_n;
++    logic                       pt_tag_wd_q, pt_tag_wd_n; 
++    riscv::mtag_t               mtag_q, mtag_n;
++
++
++function automatic logic ppn_has_tag(logic [riscv::PPNW-1:0] ppn);
++    return 1'b1;
++    //logic [riscv::PPNW-1:0] min_ppn = ariane_pkg::PPN_MEM_OFFSET;
++    //logic [riscv::PPNW-1:0] max_ppn = tag_sto_base_i >> 12;
++    //logic out = (ppn >= min_ppn && ppn < max_ppn);
++    //return out;
++endfunction : ppn_has_tag
++
++function automatic logic [riscv::PLEN-1:0] ppn_to_tag_paddr(logic [riscv::PPNW-1:0] ppn, logic tag_offset);
++    // out = base + (ppn - mem_offset) * tag_size + offset
++    // ppn comes either from satp or from a pte
++    // NOTE "* tag_size" is equivalent to bitshifts by 2 bits (=4B=32bit tags), or 3 for 64bit tags, or 4 for 128bit tags
++    // NOTE tag_offset << 3 means that we are adding 8 bytes (if the bit is set) to the tag address
++    // NOTE we are assuming that entire ram is covered by tagstore for now
++    // NOTE we assume that tag_sto_base_i is page aligned for slightly more efficient address calculations
++    logic [riscv::PLEN-1:0] out;
++    //logic [riscv::PPNW-1:0] ppn_normalized = ppn - ariane_pkg::PPN_MEM_OFFSET;
++    logic [riscv::PPNW-1:0] ppn_normalized = ppn - tag_dram_base_i;
++    logic [riscv::PLEN-1:0] tag_sto_base_aligned = tag_sto_base_i[riscv::PLEN-1:0];
++    //logic [riscv::PLEN-1:0] tag_sto_base_aligned = {tag_sto_base_i[riscv::PLEN-1:12], 12'b0}; //TODO future optimization
++    case (tag_mode_i)
++        riscv::MTAG128 : out = tag_sto_base_aligned + (ppn_normalized << 4) + (tag_offset << 3);
++        riscv::MTAG64  : out = tag_sto_base_aligned + (ppn_normalized << 3);
++        riscv::MTAG32  : out = tag_sto_base_aligned + (ppn_normalized << 2);
++        riscv::MTAG0   : out = 64'b0;
++        default        : out = 64'b0;
++    endcase
++    return out;
++endfunction : ppn_to_tag_paddr
++
++function automatic tlb_update_tagbits_t tag_to_tlb_update_tag(riscv::mtag_t tag);
++    tlb_update_tagbits_t out;
++    out.e         = (tag_mode_i == riscv::MTAG0)   ? 1'b0  : (tag.pt == riscv::PT_ENCLAVE || tag.pt == riscv::PT_MONITOR);
++    out.imm       = (tag_mode_i == riscv::MTAG0)   ? 1'b0  : tag.immutable;
++    out.hpce      = (tag_mode_i == riscv::MTAG0)   ? 1'b0  : tag.hpce;
++    out.pt        = (tag_mode_i == riscv::MTAG0)   ? riscv::PT_NORMAL : tag.pt;
++    out.eid       = (tag_mode_i == riscv::MTAG0)   ? '0    : tag.id;
++`ifdef TAGMPK
++    out.mpk       = (tag_mode_i <  riscv::MTAG128) ? 10'b0 : tag.mpk;
++`endif
++`ifdef INCLUDE_FUTURE
++    out.future    = (tag_mode_i == riscv::MTAG128) ? tag.future : '0;
++    out.pte_perms = (tag_mode_i == riscv::MTAG0 || tag_mode_i == riscv::MTAG32)   ? 5'b0  : tag.pte_perms;
++`endif
++
++    return out;
++endfunction : tag_to_tlb_update_tag
++
+     // Assignments
+     assign update_vaddr_o  = vaddr_q;
+ 
+     assign ptw_active_o    = (state_q != IDLE);
+     assign walking_instr_o = is_instr_ptw_q;
+     // directly output the correct physical address
+-    assign req_port_o.address_index = ptw_pptr_q[DCACHE_INDEX_WIDTH-1:0];
+-    assign req_port_o.address_tag   = ptw_pptr_q[DCACHE_INDEX_WIDTH+DCACHE_TAG_WIDTH-1:DCACHE_INDEX_WIDTH];
++    assign req_port_o.address_index = read_tag_q ? mtag_paddr[DCACHE_INDEX_WIDTH-1:0]  : ptw_pptr_q[DCACHE_INDEX_WIDTH-1:0];
++    assign req_port_o.address_tag   = read_tag_q ? mtag_paddr[DCACHE_INDEX_WIDTH+DCACHE_TAG_WIDTH-1:DCACHE_INDEX_WIDTH] : ptw_pptr_q[DCACHE_INDEX_WIDTH+DCACHE_TAG_WIDTH-1:DCACHE_INDEX_WIDTH];
+     // we are never going to kill this request
+     assign req_port_o.kill_req      = '0;
+     // we are never going to write with the HPTW
+     assign req_port_o.data_wdata    = 64'b0;
++
++    //NOTE: we dont check inside_enclave_i here, instead the SW sets the nc_ptw_in_e bit when entering an enclave and clears it when exiting.
++    //assign req2_port_o.nc = inside_enclave_i & tag_control_i.nc_ptw_in_e; //dont cache PTW (tag+pte) fetches if inside encalve and if tag_control bit is set.
++    assign req2_port_o.nc = tag_control_i.nc_ptw_in_e; //dont cache PTW (tag+pte) fetches if inside encalve and if tag_control bit is set.
++
++    logic tagging_is_enabled;
++    assign tagging_is_enabled = (tag_mode_i != riscv::MTAG0); // we are assuming that tag_sto_base_i etc is set up correctly
++
+     // -----------
+     // TLB Update
+     // -----------
+     assign itlb_update_o.vpn = {{39-riscv::SV{1'b0}}, vaddr_q[riscv::SV-1:12]};
+     assign dtlb_update_o.vpn = {{39-riscv::SV{1'b0}}, vaddr_q[riscv::SV-1:12]};
++
++    // TLB tag bits
++    assign itlb_update_o.tlb_update_tagbits = tag_to_tlb_update_tag(mtag_q);
++    assign dtlb_update_o.tlb_update_tagbits = tag_to_tlb_update_tag(mtag_q);
++
+     // update the correct page table level
+     assign itlb_update_o.is_2M = (ptw_lvl_q == LVL2);
+     assign itlb_update_o.is_1G = (ptw_lvl_q == LVL1);
+@@ -126,13 +213,12 @@ module ptw import ariane_pkg::*; #(
+     assign itlb_update_o.asid = tlb_update_asid_q;
+     assign dtlb_update_o.asid = tlb_update_asid_q;
+     // set the global mapping bit
+-    assign itlb_update_o.content = pte | (global_mapping_q << 5);
+-    assign dtlb_update_o.content = pte | (global_mapping_q << 5);
++    assign itlb_update_o.content = ((!tagging_is_enabled) ? pte : pte_q) | (global_mapping_q << 5);
++    assign dtlb_update_o.content = ((!tagging_is_enabled) ? pte : pte_q) | (global_mapping_q << 5);
+ 
+     assign req_port_o.tag_valid      = tag_valid_q;
+ 
+     logic allow_access;
+-
+     assign bad_paddr_o = ptw_access_exception_o ? ptw_pptr_q : 'b0;
+ 
+     pmp #(
+@@ -177,6 +263,7 @@ module ptw import ariane_pkg::*; #(
+     always_comb begin : ptw
+         // default assignments
+         // PTW memory interface
++        pte_n                  = pte_q;
+         tag_valid_n            = 1'b0;
+         req_port_o.data_req    = 1'b0;
+         req_port_o.data_be     = 8'hFF;
+@@ -184,6 +271,7 @@ module ptw import ariane_pkg::*; #(
+         req_port_o.data_we     = 1'b0;
+         ptw_error_o            = 1'b0;
+         ptw_access_exception_o = 1'b0;
++        encl_access_exception_o= 1'b0;
+         itlb_update_o.valid    = 1'b0;
+         dtlb_update_o.valid    = 1'b0;
+         is_instr_ptw_n         = is_instr_ptw_q;
+@@ -191,6 +279,16 @@ module ptw import ariane_pkg::*; #(
+         ptw_pptr_n             = ptw_pptr_q;
+         state_d                = state_q;
+         global_mapping_n       = global_mapping_q;
++
++        mtag_n                 = mtag_q;
++        tag_offset_n           = tag_offset_q;
++        tag_first_n            = tag_first_q;
++        read_tag_n             = read_tag_q;
++        pt_tag_wd_n            = pt_tag_wd_q;
++        //fetch_4k_tag_n         = fetch_4k_tag_q;
++
++        last_level_n           = last_level_q;
++
+         // input registers
+         tlb_update_asid_n     = tlb_update_asid_q;
+         vaddr_n               = vaddr_q;
+@@ -198,6 +296,13 @@ module ptw import ariane_pkg::*; #(
+         itlb_miss_o           = 1'b0;
+         dtlb_miss_o           = 1'b0;
+ 
++        //NOTE: we also use satp_ppn_i or pte_q.ppn wherever we set read_tag_n
++        if (tag_first_q) begin
++            mtag_paddr = ppn_to_tag_paddr(satp_ppn_i, tag_offset_q);
++        end else begin
++            mtag_paddr = ppn_to_tag_paddr(pte_q.ppn, tag_offset_q);
++        end
++
+         case (state_q)
+ 
+             IDLE: begin
+@@ -205,10 +310,20 @@ module ptw import ariane_pkg::*; #(
+                 ptw_lvl_n        = LVL1;
+                 global_mapping_n = 1'b0;
+                 is_instr_ptw_n   = 1'b0;
++                read_tag_n       = 1'b0;
++                tag_offset_n     = 1'b0;
++                last_level_n     = 1'b0; 
++                pt_tag_wd_n      = 1'b1;
++                //fetch_4k_tag_n   = 1'b0;
++                mtag_n           = '0;
++                
++                //NOTE: we set read_tag_n already at the beginning, because we need to fetch the Tag
+                 // if we got an ITLB miss
+                 if (enable_translation_i & itlb_access_i & ~itlb_hit_i & ~dtlb_access_i) begin
+                     ptw_pptr_n          = {satp_ppn_i, itlb_vaddr_i[riscv::SV-1:30], 3'b0};
+                     is_instr_ptw_n      = 1'b1;
++                    read_tag_n          = tagging_is_enabled && ppn_has_tag(satp_ppn_i);
++                    tag_first_n         = 1'b1;
+                     tlb_update_asid_n   = asid_i;
+                     vaddr_n             = itlb_vaddr_i;
+                     state_d             = WAIT_GRANT;
+@@ -217,6 +332,8 @@ module ptw import ariane_pkg::*; #(
+                 end else if (en_ld_st_translation_i & dtlb_access_i & ~dtlb_hit_i) begin
+                     ptw_pptr_n          = {satp_ppn_i, dtlb_vaddr_i[riscv::SV-1:30], 3'b0};
+                     tlb_update_asid_n   = asid_i;
++                    read_tag_n          = tagging_is_enabled && ppn_has_tag(satp_ppn_i);
++                    tag_first_n         = 1'b1;
+                     vaddr_n             = dtlb_vaddr_i;
+                     state_d             = WAIT_GRANT;
+                     dtlb_miss_o         = 1'b1;
+@@ -230,10 +347,130 @@ module ptw import ariane_pkg::*; #(
+                 if (req_port_i.data_gnt) begin
+                     // send the tag valid signal one cycle later
+                     tag_valid_n = 1'b1;
+-                    state_d     = PTE_LOOKUP;
++                    if (tagging_is_enabled && read_tag_q) begin
++                        state_d     = TAG_LOOKUP;
++                    end else begin
++                        state_d     = PTE_LOOKUP;
++                    end
+                 end
+             end
+ 
++            TAG_LOOKUP: begin
++                // we wait for the valid signal
++                if (data_rvalid_q) begin
++                    if (tag_offset_q == 1'b0) begin
++                        //WARNING: ONLY ACCESS THE LOWER 64 bits of "tag.*" here!
++
++                        // store lower part of tag
++                        mtag_n [63:0] = tag[63:0];
++
++                        // save immutable bit of pte tag
++                        if (!last_level_q) pt_tag_wd_n = pt_tag_wd_q & tag.immutable;
++
++                        //TODO ENCLAVE pages should probably never be global_mapping_q, because global_mapping_q are handled differently?
++
++                        // there are several cases where we have to raise an exception here 
++                        // 1. if last level page is an enclave page and the corresponding page tables are mutable
++                        if (!tag_control_i.disable_immutable_pt_checks // if immutable pagetable checks are enabled
++                            && (last_level_q // and is leaf PTE
++                                & ((tag.pt == riscv::PT_ENCLAVE) || (tag.pt == riscv::PT_MONITOR)) // and is enclave page
++                                & !pt_tag_wd_q )) begin // and immutable bit was missing
++                            state_d = PROPAGATE_ENC_ERROR;
++
++                        // we consider VPN and PTE_Perm bits as part of 'future bits'
++                        // for builds without 'future bits' we don't need these checks
++                        `ifdef INCLUDE_FUTURE
++                        // 2. if last level page is an enclave page and the VPN doesn't match the VPN stored in the tag (or pte_permissions)
++                        end else if (last_level_q &
++                                     (!tag_control_i.disable_tag_compare_checks) &
++                                     (tag.pt == riscv::PT_ENCLAVE) &
++                                     (tag_mode_i == riscv::MTAG64 || tag_mode_i == riscv::MTAG128) & /* tag mode >= 64bit. because only then do we have the VPN/pte_perms */
++                                     (
++                                        tag.vpn != {{39-riscv::SV{1'b0}}, vaddr_q[riscv::SV-1:12]} | 
++                                        /*(tag.pte_perms.g != global_mapping_q) | */
++                                        (tag.pte_perms.u != pte_q.u) |
++                                        (tag.pte_perms.x != pte_q.x) |
++                                        (tag.pte_perms.w != pte_q.w) |
++                                        (tag.pte_perms.r != pte_q.r)
++                                     ) ) begin
++                            state_d = PROPAGATE_ENC_ERROR;
++                        `endif
++                        // 3. if last level page is an enclave page and page level is mismatching (giga/mega/kilo page confusion)
++                        //TODO this can only happen if non-immutable PTs
++                        end else if ((!tag_control_i.disable_tag_compare_checks) &
++                                     (
++                                         (last_level_q  && (tag.pt == riscv::PT_ENCLAVE)) |
++                                         (!last_level_q && (tag.pt == riscv::PT_PAGETABLE))
++                                     ) &
++                                     (
++                                       (ptw_lvl_q == LVL1 && tag.page_level != riscv::PL_GIGA) ||
++                                       (ptw_lvl_q == LVL2 && tag.page_level != riscv::PL_MEGA) ||
++                                       (ptw_lvl_q == LVL3 && tag.page_level != riscv::PL_KILO)
++                                     ) ) begin
++                            state_d = PROPAGATE_ENC_ERROR;
++                        end else begin
++                            if (tag_mode_i == riscv::MTAG128) begin // need to fetch 2nd tag word in this case
++                                tag_offset_n = 1'b1;
++                                state_d = WAIT_GRANT;
++                            end else begin
++                                tag_offset_n = 1'b0;
++                                read_tag_n = 1'b0;
++                                tag_first_n = 1'b0;
++                                if (last_level_q) begin
++                                    //TODO LVL1
++                                    if (tag.hpce && (ptw_lvl_q == LVL2)) begin
++                                        //PL_MEGA page contains enclave page => generate PL_KILO TLB entry
++                                        //fetch_4k_tag_n = 1'b1;
++                                        read_tag_n = 1'b1; //tagging_is_enabled && ppn_has_tag(pte_q.ppn);
++                                        ptw_lvl_n = LVL3;
++                                        pte_n.ppn = pte_q.ppn | vaddr_q[20:12];
++                                        state_d = WAIT_GRANT;
++                                    end else begin
++                                        state_d = TAG_FINAL;
++                                    end
++                                end else begin
++                                    state_d = WAIT_GRANT;
++                                end
++                            end
++                        end
++                    end else begin // tag_offset is 1 (we want to read the upper 64-bit of the tag)
++                        // store upper part of tag
++                        mtag_n [riscv::MTAG_LEN-1:64] = tag[63:0];
++                        tag_offset_n = 1'b0;
++                        read_tag_n = 1'b0;
++                        tag_first_n = 1'b0;
++                        
++                        if (last_level_q) begin
++                            // final tag fetch was a megapage tag with hpce set
++                            // -> read 4K Tag and create a 4K TLB update
++                            //TODO LVL1
++                            //NOTE: upper 64 bit of mtag_q are not valid at this point. dont access. use tag[63:0].
++                            if (mtag_q.hpce && (ptw_lvl_q == LVL2)) begin
++                                //fetch_4k_tag_n = 1'b1;
++                                read_tag_n = 1'b1;//tagging_is_enabled && ppn_has_tag(pte_q.ppn);
++                                ptw_lvl_n = LVL3;
++                                pte_n.ppn = pte_q.ppn | vaddr_q[20:12];
++                                state_d = WAIT_GRANT;
++                            end else begin
++                                state_d = TAG_FINAL;
++                            end
++                        end else begin
++                            state_d = WAIT_GRANT;
++                        end
++                    end
++                end 
++            end
++
++            TAG_FINAL: begin
++                //NOTE: TAG_FINAL exists because mtag_q is only set when entering TAG_LOOKUP. if valid bit was set before that, we'd have wrong data. For 128-bit tags, we'd need to use the data that we read with the old lower 64-bit data
++                if (is_instr_ptw_q) begin
++                    itlb_update_o.valid = 1'b1;
++                end else begin
++                    dtlb_update_o.valid = 1'b1;
++                end
++                state_d = IDLE;
++            end
++
+             PTE_LOOKUP: begin
+                 // we wait for the valid signal
+                 if (data_rvalid_q) begin
+@@ -266,7 +503,12 @@ module ptw import ariane_pkg::*; #(
+                                 // to the access flag since we let the access flag be managed by SW.
+                                 if (!pte.x || !pte.a)
+                                   state_d = PROPAGATE_ERROR;
+-                                else
++                                else if (tagging_is_enabled && ppn_has_tag(pte.ppn)) begin
++                                  pte_n = pte; //save pte for tlb update
++                                  last_level_n = 1'b1;
++                                  read_tag_n = 1'b1; ;
++                                  state_d = WAIT_GRANT;
++                                end else
+                                   itlb_update_o.valid = 1'b1;
+ 
+                             end else begin
+@@ -279,7 +521,14 @@ module ptw import ariane_pkg::*; #(
+                                 // we can directly raise an error. This doesn't put a useless
+                                 // entry into the TLB.
+                                 if (pte.a && (pte.r || (pte.x && mxr_i))) begin
+-                                  dtlb_update_o.valid = 1'b1;
++                                    if (tagging_is_enabled && ppn_has_tag(pte.ppn)) begin 
++                                        pte_n = pte;
++                                        last_level_n = 1'b1;
++                                        read_tag_n = 1'b1;
++                                        state_d = WAIT_GRANT;
++                                    end else begin
++                                        dtlb_update_o.valid = 1'b1;
++                                    end
+                                 end else begin
+                                   state_d   = PROPAGATE_ERROR;
+                                 end
+@@ -317,6 +566,10 @@ module ptw import ariane_pkg::*; #(
+                                 ptw_lvl_n  = LVL3;
+                                 ptw_pptr_n = {pte.ppn, vaddr_q[20:12], 3'b0};
+                             end
++                            
++                            // save this since we need it for the tag address 
++                            pte_n = pte;
++                            read_tag_n = tagging_is_enabled && ppn_has_tag(pte.ppn);
+ 
+                             state_d = WAIT_GRANT;
+ 
+@@ -348,6 +601,10 @@ module ptw import ariane_pkg::*; #(
+                 state_d     = IDLE;
+                 ptw_access_exception_o = 1'b1;
+             end
++            PROPAGATE_ENC_ERROR: begin
++                state_d     = IDLE;
++                encl_access_exception_o = 1'b1;
++            end
+             // wait for the rvalid before going back to IDLE
+             WAIT_RVALID: begin
+                 if (data_rvalid_q)
+@@ -367,7 +624,7 @@ module ptw import ariane_pkg::*; #(
+             // 1. in the PTE Lookup check whether we still need to wait for an rvalid
+             // 2. waiting for a grant, if so: wait for it
+             // if not, go back to idle
+-            if ((state_q == PTE_LOOKUP && !data_rvalid_q) || ((state_q == WAIT_GRANT) && req_port_i.data_gnt))
++            if ((state_q == PTE_LOOKUP && !data_rvalid_q) || ((state_q == TAG_LOOKUP) && !data_rvalid_q) || ((state_q == WAIT_GRANT) && req_port_i.data_gnt)) //TODO are we sure that TAG_FINAL state shouldnt also be listed here?
+                 state_d = WAIT_RVALID;
+             else
+                 state_d = IDLE;
+@@ -378,6 +635,7 @@ module ptw import ariane_pkg::*; #(
+     always_ff @(posedge clk_i or negedge rst_ni) begin
+         if (~rst_ni) begin
+             state_q            <= IDLE;
++            pte_q              <= '0;
+             is_instr_ptw_q     <= 1'b0;
+             ptw_lvl_q          <= LVL1;
+             tag_valid_q        <= 1'b0;
+@@ -387,8 +645,16 @@ module ptw import ariane_pkg::*; #(
+             global_mapping_q   <= 1'b0;
+             data_rdata_q       <= '0;
+             data_rvalid_q      <= 1'b0;
++            read_tag_q         <= 1'b0;
++            mtag_q             <= '0;
++            tag_offset_q       <= '0;
++            tag_first_q        <= '0;
++            pt_tag_wd_q        <= 1'b1;
++            last_level_q       <= 0;
++            //fetch_4k_tag_q     <= 0;
+         end else begin
+             state_q            <= state_d;
++            pte_q              <= pte_n;
+             ptw_pptr_q         <= ptw_pptr_n;
+             is_instr_ptw_q     <= is_instr_ptw_n;
+             ptw_lvl_q          <= ptw_lvl_n;
+@@ -398,6 +664,13 @@ module ptw import ariane_pkg::*; #(
+             global_mapping_q   <= global_mapping_n;
+             data_rdata_q       <= req_port_i.data_rdata;
+             data_rvalid_q      <= req_port_i.data_rvalid;
++            read_tag_q         <= read_tag_n;
++            mtag_q             <= mtag_n;
++            tag_offset_q       <= tag_offset_n;
++            tag_first_q        <= tag_first_n;
++            pt_tag_wd_q        <= pt_tag_wd_n;
++            last_level_q       <= last_level_n;
++            //fetch_4k_tag_q     <= fetch_4k_tag_n;
+         end
+     end
+ 
+diff --git a/src/tlb.sv b/src/tlb.sv
+index 5a0aeac..6c398a7 100644
+--- a/src/tlb.sv
++++ b/src/tlb.sv
+@@ -22,6 +22,9 @@ module tlb import ariane_pkg::*; #(
+     input  logic                    clk_i,    // Clock
+     input  logic                    rst_ni,   // Asynchronous reset active low
+     input  logic                    flush_i,  // Flush signal
++    `ifdef CUSTOM_FENCE
++    input  logic                    flush_tlb_plru_tree_i,
++    `endif
+     // Update TLB
+     input  tlb_update_t             update_i,
+     // Lookup signals
+@@ -29,11 +32,34 @@ module tlb import ariane_pkg::*; #(
+     input  logic [ASID_WIDTH-1:0]   lu_asid_i,
+     input  logic [riscv::VLEN-1:0]  lu_vaddr_i,
+     output riscv::pte_t             lu_content_o,
++    output logic                    e_o,
++    output logic                    imm_o,
++    output logic                    hpce_o,
++    output logic [ASID_WIDTH-1:0]   id_o,
+     input  logic [ASID_WIDTH-1:0]   asid_to_be_flushed_i,
+     input  logic [riscv::VLEN-1:0]  vaddr_to_be_flushed_i,
+     output logic                    lu_is_2M_o,
+     output logic                    lu_is_1G_o,
++    input  logic [ASID_WIDTH-1:0]   meid_i,
++    input  riscv::tagmode_t         tag_mode_i,
++`ifdef TAGMPK
++    `ifdef INCLUDE_FUTURE
++        output logic [93:0]         future_o,
++    `endif
++`else
++    `ifdef INCLUDE_FUTURE
++        output logic [103:0]        future_o, 
++    `endif
++`endif
++`ifdef MTAGDEBUG
++    output logic                    lu_hit_o,
++    input logic  [63:0]             debug_tag_position_i,
++    input logic                     debug_tag_offset_i,
++    input logic                     debug_read_tag_i,
++    output logic [63:0]             debug_tag_o
++`else
+     output logic                    lu_hit_o
++`endif
+ );
+ 
+     // SV39 defines three levels of page tables
+@@ -42,9 +68,21 @@ module tlb import ariane_pkg::*; #(
+       logic [riscv::VPN2:0]  vpn2;
+       logic [8:0]            vpn1;
+       logic [8:0]            vpn0;
++      logic                  e;
++      logic                  imm;
++      logic                  hpce;
+       logic                  is_2M;
+       logic                  is_1G;
+       logic                  valid;
++      `ifdef TAGMPK
++        `ifdef INCLUDE_FUTURE
++            logic [93:0]     future; 
++        `endif
++      `else
++        `ifdef INCLUDE_FUTURE
++            logic [103:0]    future; 
++        `endif
++      `endif
+     } [TLB_ENTRIES-1:0] tags_q, tags_n;
+ 
+     riscv::pte_t [TLB_ENTRIES-1:0] content_q, content_n;
+@@ -66,17 +104,46 @@ module tlb import ariane_pkg::*; #(
+         lu_content_o = '{default: 0};
+         lu_is_1G_o   = 1'b0;
+         lu_is_2M_o   = 1'b0;
++        id_o         = '0;
++        e_o          = '0;
++        imm_o        = '0;
++        hpce_o       = '0;
++`ifdef INCLUDE_FUTURE
++        future_o     = '0;
++`endif
++
++`ifdef MTAGDEBUG
++        debug_tag_o = 64'h0;
++`endif
+ 
+         for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
++`ifdef MTAGDEBUG 
++            if (debug_read_tag_i && i == debug_tag_position_i) begin
++                if (debug_tag_offset_i == 0) begin
++                    debug_tag_o = tags_q[i];
++                end else begin
++                    debug_tag_o = tags_q[i];
++                end
++            end
++`endif 
++
+             // first level match, this may be a giga page, check the ASID flags as well
+             // if the entry is associated to a global address, don't match the ASID (ASID is don't care)
+-            if (tags_q[i].valid && ((lu_asid_i == tags_q[i].asid) || content_q[i].g)  && vpn2 == tags_q[i].vpn2) begin
++            //TODO dont allow global + e at the same time
++            if (tags_q[i].valid && ((lu_asid_i == tags_q[i].asid) || (content_q[i].g) || (tags_q[i].e && (tags_q[i].asid == meid_i)))  && vpn2 == tags_q[i].vpn2) begin
+                 // second level
+                 if (tags_q[i].is_1G) begin
+                     lu_is_1G_o = 1'b1;
+                     lu_content_o = content_q[i];
+                     lu_hit_o   = 1'b1;
+                     lu_hit[i]  = 1'b1;
++                    id_o       = tags_q[i].asid;
++                    e_o        = tags_q[i].e;
++                    imm_o      = tags_q[i].imm;
++                    hpce_o     = tags_q[i].hpce;
++                    `ifdef INCLUDE_FUTURE
++                        future_o    = tags_q[i].future;
++                    `endif
+                 // not a giga page hit so check further
+                 end else if (vpn1 == tags_q[i].vpn1) begin
+                     // this could be a 2 mega page hit or a 4 kB hit
+@@ -86,14 +153,19 @@ module tlb import ariane_pkg::*; #(
+                         lu_content_o = content_q[i];
+                         lu_hit_o     = 1'b1;
+                         lu_hit[i]    = 1'b1;
++                        id_o         = tags_q[i].asid;
++                        e_o          = tags_q[i].e;
++                        imm_o        = tags_q[i].imm;
++                        hpce_o       = tags_q[i].hpce;
++                        `ifdef INCLUDE_FUTURE
++                            future_o    = tags_q[i].future;
++                        `endif
+                     end
+                 end
+             end
+         end
+     end
+ 
+-
+-
+     logic asid_to_be_flushed_is0;  // indicates that the ASID provided by SFENCE.VMA (rs2)is 0, active high
+     logic vaddr_to_be_flushed_is0;  // indicates that the VADDR provided by SFENCE.VMA (rs1)is 0, active high
+     logic  [TLB_ENTRIES-1:0] vaddr_vpn0_match;
+@@ -134,16 +206,31 @@ module tlb import ariane_pkg::*; #(
+             end else if (update_i.valid & replace_en[i]) begin
+                 // update tag array
+                 tags_n[i] = '{
+-                    asid:  update_i.asid,
++                    asid:  (update_i.tlb_update_tagbits.e == 1'b1) ? update_i.tlb_update_tagbits.eid : update_i.asid,
+                     vpn2:  update_i.vpn [18+riscv::VPN2:18],
+                     vpn1:  update_i.vpn [17:9],
+                     vpn0:  update_i.vpn [8:0],
++                    e:     update_i.tlb_update_tagbits.e, 
++                    imm:   update_i.tlb_update_tagbits.imm,
++                    hpce:  update_i.tlb_update_tagbits.hpce,
+                     is_1G: update_i.is_1G,
+                     is_2M: update_i.is_2M,
++
++                `ifdef INCLUDE_FUTURE
++                    valid: 1'b1,
++                    future: {update_i.tlb_update_tagbits.future, update_i.tlb_update_tagbits.pte_perms, 36'b0}
++                `else
+                     valid: 1'b1
++                `endif
+                 };
+-                // and content as well
++
++                // update content with permissions from tag for
++                // enclave/monitor pages
+                 content_n[i] = update_i.content;
++                `ifdef TAGMPK
++                    content_n[i].reserved = update_i.tlb_update_tagbits.mpk;
++                `endif
++
+             end
+         end
+     end
+@@ -225,6 +312,11 @@ module tlb import ariane_pkg::*; #(
+             end
+             replace_en[i] = en;
+         end
++        `ifdef CUSTOM_FENCE
++        if (flush_tlb_plru_tree_i) begin
++            plru_tree_n = '0;
++        end
++        `endif
+     end
+ 
+     // sequential process
+diff --git a/tb/tb_cva6_icache/hdl/tb.sv b/tb/tb_cva6_icache/hdl/tb.sv
+index 91e36c7..606eed9 100644
+--- a/tb/tb_cva6_icache/hdl/tb.sv
++++ b/tb/tb_cva6_icache/hdl/tb.sv
+@@ -267,6 +267,9 @@ module tb import tb_pkg::*; import ariane_pkg::*; import wt_cache_pkg::*; #()();
+     .clk_i          ( clk_i          ),
+     .rst_ni         ( rst_ni         ),
+     .flush_i        ( flush_i        ),
++    `ifdef CUSTOM_FENCE
++    .flush_lfsr_i   ( 1'b0           ),
++    `endif
+     .en_i           ( en_i           ),
+     .miss_o         ( miss_o         ),
+     .areq_i         ( areq_i         ),

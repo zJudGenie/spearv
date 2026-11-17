@@ -17,6 +17,9 @@
 #include <sys/wait.h>
 #include <sys/types.h>
 
+// global debug log level setting:
+size_t debug_log_level = 1; //set to 1, because we want to see fatal errors only
+
 volatile bool ctrlc_pressed = false;
 static void handle_signal(int sig)
 {
@@ -35,7 +38,8 @@ sim_t::sim_t(const char* isa, const char* priv, const char* varch,
              std::vector<int> const hartids,
              const debug_module_config_t &dm_config,
              const char *log_path,
-             bool dtb_enabled, const char *dtb_file)
+             bool dtb_enabled, const char *dtb_file,
+             size_t tag_width, size_t tag_granularity)
   : htif_t(args),
     mems(mems),
     plugin_devices(plugin_devices),
@@ -65,7 +69,7 @@ sim_t::sim_t(const char* isa, const char* priv, const char* varch,
 
   debug_module.add_device(&bus);
 
-  debug_mmu = new mmu_t(this, NULL);
+  debug_mmu = new mmu_t(this, NULL, tag_width, tag_granularity);
 
   if (! (hartids.empty() || hartids.size() == nprocs)) {
       std::cerr << "Number of specified hartids ("
@@ -78,7 +82,7 @@ sim_t::sim_t(const char* isa, const char* priv, const char* varch,
   for (size_t i = 0; i < nprocs; i++) {
     int hart_id = hartids.empty() ? i : hartids[i];
     procs[i] = new processor_t(isa, priv, varch, this, hart_id, halted,
-                               log_file.get());
+                               log_file.get(), tag_width, tag_granularity);
   }
 
   make_dtb();

@@ -23,7 +23,7 @@
 
 processor_t::processor_t(const char* isa, const char* priv, const char* varch,
                          simif_t* sim, uint32_t id, bool halt_on_reset,
-                         FILE* log_file)
+                         FILE* log_file, size_t tag_width, size_t tag_granularity)
   : debug(false), halt_request(HR_NONE), sim(sim), id(id), xlen(0),
   histogram_enabled(false), log_commits_enabled(false),
   log_file(log_file), halt_on_reset(halt_on_reset),
@@ -36,7 +36,7 @@ processor_t::processor_t(const char* isa, const char* priv, const char* varch,
   parse_varch_string(varch);
 
   register_base_instructions();
-  mmu = new mmu_t(sim, this);
+  mmu = new mmu_t(sim, this, tag_width, tag_granularity);
 
   disassembler = new disassembler_t(max_xlen);
   for (auto e : custom_extensions)
@@ -341,6 +341,11 @@ void state_t::reset(reg_t max_isa)
   vstval = 0;
   vsatp = 0;
 
+  meid = 0;
+  eam = 0;
+  tag_storage_base = 0;
+  tag_dram_base = 0;
+
   dpc = 0;
   dscratch0 = 0;
   dscratch1 = 0;
@@ -644,6 +649,34 @@ void processor_t::set_virt(bool virt)
      * set_virt() is always used in conjucter with set_privilege() and
      * set_privilege() will flush TLB unconditionally.
      */
+    if (state.v and !virt) {
+      /*
+       * When transitioning from virt-on (VS/VU) to virt-off (HS/M)
+       * we should mark Host extension status (i.e. FS, VS, and XS
+       * bits) as dirty when Guest/VM extension status is dirty and
+       * Host extension status is initial, clean, or dirty.
+       */
+      if ((state.vsstatus & SSTATUS_FS) &&
+          ((state.mstatus & SSTATUS_FS) == SSTATUS_FS)) {
+        state.vsstatus |= SSTATUS_FS;
+      }
+      if (supports_extension('V') &&
+          (state.vsstatus & SSTATUS_VS) &&
+          ((state.mstatus & SSTATUS_VS) == SSTATUS_VS)) {
+        state.vsstatus |= SSTATUS_VS;
+      }
+      if ((state.vsstatus & SSTATUS_XS) &&
+          ((state.mstatus & SSTATUS_XS) == SSTATUS_XS)) {
+        state.vsstatus |= SSTATUS_XS;
+      }
+      /* Update SD bit of Host */
+      state.vsstatus &= (xlen == 64 ? ~SSTATUS64_SD : ~SSTATUS32_SD);
+      if (((state.mstatus & SSTATUS_FS) == SSTATUS_FS) ||
+          ((state.vsstatus & SSTATUS_VS) == SSTATUS_VS) ||
+          ((state.vsstatus & SSTATUS_XS) == SSTATUS_XS)) {
+         state.vsstatus |= (xlen == 64 ? SSTATUS64_SD : SSTATUS32_SD);
+      }
+    }
     mask = SSTATUS_VS_MASK;
     mask |= (supports_extension('V') ? SSTATUS_VS : 0);
     mask |= (xlen == 64 ? SSTATUS64_SD : SSTATUS32_SD);
@@ -735,8 +768,7 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     s = set_field(s, MSTATUS_SIE, 0);
     set_csr(CSR_MSTATUS, s);
     s = state.hstatus;
-    if (curr_virt)
-      s = set_field(s, HSTATUS_SPVP, state.prv);
+    s = set_field(s, HSTATUS_SPVP, state.prv);
     s = set_field(s, HSTATUS_SPV, curr_virt);
     s = set_field(s, HSTATUS_GVA, t.has_gva());
     set_csr(CSR_HSTATUS, s);
@@ -883,6 +915,51 @@ void processor_t::set_csr(int which, reg_t val)
 
   switch (which)
   {
+    // memory tagging
+    /*
+    case CSR_U_TAG_ADDR:
+      state.tag_addr = val;
+      break;
+    case CSR_U_TAG_VALUE_L:
+      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_L);
+      break;
+    case CSR_U_TAG_VALUE_H:
+      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_H);
+      break;
+    case CSR_U_TAG_VALUE_EL:
+      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_EL);
+      break;
+    case CSR_U_TAG_VALUE_EH:
+      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_EH);
+      break;
+    */
+    case CSR_U_MPKEY_CONFIG:
+      state.mpk_config = val;
+      break;
+    case CSR_U_TAG_STORAGE_BASE:
+      state.tag_storage_base = val;
+      break;
+    case CSR_U_TAG_DRAM_BASE:
+      state.tag_dram_base = val;
+      break;
+    case CSR_U_TAG_MODE:
+      state.tag_mode = val;
+      break;
+    case CSR_U_MEID:
+      state.meid = val;
+      break;
+    case CSR_U_TCS:
+      state.tcs = val;
+      break;
+    case CSR_U_EAM:
+      state.eam = val;
+      break;
+    case CSR_U_EMP:
+      state.emp = val;
+      break;
+    case CSR_U_TAG_CONTROL:
+      state.tag_control = val;
+      break;
     case CSR_MENTROPY:
       es.set_mentropy(val);
       break;
@@ -973,13 +1050,20 @@ void processor_t::set_csr(int which, reg_t val)
         (1 << CAUSE_SUPERVISOR_ECALL) |
         (1 << CAUSE_FETCH_PAGE_FAULT) |
         (1 << CAUSE_LOAD_PAGE_FAULT) |
+        //TODO why are tehse commented out? do they not exist?
+       /* 
+        (1 << CAUSE_MPKEY_MISMATCH_FAULT) |
+        (1 << CAUSE_ESMAP_MISMATCH_FAULT) |
+        (1 << CAUSE_MEID_MISMATCH_FAULT) |
+        (1 << CAUSE_ENC_INTEGRITY_FAULT) |
+       */ 
         (1 << CAUSE_STORE_PAGE_FAULT);
       mask |= supports_extension('H') ?
         (1 << CAUSE_VIRTUAL_SUPERVISOR_ECALL) |
         (1 << CAUSE_FETCH_GUEST_PAGE_FAULT) |
         (1 << CAUSE_LOAD_GUEST_PAGE_FAULT) |
         (1 << CAUSE_VIRTUAL_INSTRUCTION) |
-        (1 << CAUSE_STORE_GUEST_PAGE_FAULT)
+        (1 << CAUSE_STORE_GUEST_PAGE_FAULT) 
         : 0;
       state.medeleg = (state.medeleg & ~mask) | (val & mask);
       break;
@@ -1039,10 +1123,20 @@ void processor_t::set_csr(int which, reg_t val)
       if (!supports_impl(IMPL_MMU))
         val = 0;
 
-      if (state.v)
+      if (state.v){
         state.vsatp = cal_satp(val);
-      else
+        //TODO we probably dont need to throw trap_satp_mode_change?
+      }
+      else{
+        if(state.tag_storage_base != 0
+           && get_field(state.satp, SATP64_MODE) != SATP_MODE_OFF
+           && get_field(val,        SATP64_MODE) == SATP_MODE_OFF
+        ) {
+          //tags enabled and disabling virtual memory
+          throw trap_satp_mode_change();
+        }
         state.satp = cal_satp(val);
+      }
       break;
     case CSR_SEPC:
       if (state.v)
@@ -1120,8 +1214,6 @@ void processor_t::set_csr(int which, reg_t val)
     case CSR_HEDELEG: {
       reg_t mask =
         (1 << CAUSE_MISALIGNED_FETCH) |
-        (1 << CAUSE_FETCH_ACCESS) |
-        (1 << CAUSE_ILLEGAL_INSTRUCTION) |
         (1 << CAUSE_BREAKPOINT) |
         (1 << CAUSE_MISALIGNED_LOAD) |
         (1 << CAUSE_LOAD_ACCESS) |
@@ -1184,12 +1276,11 @@ void processor_t::set_csr(int which, reg_t val)
       mask |= (supports_extension('V') ? SSTATUS_VS : 0);
       state.vsstatus = (state.vsstatus & ~mask) | (val & mask);
       state.vsstatus &= (xlen == 64 ? ~SSTATUS64_SD : ~SSTATUS32_SD);
-      if (((state.vsstatus & SSTATUS_FS) == SSTATUS_FS) ||
+      if (((state.mstatus & SSTATUS_FS) == SSTATUS_FS) ||
           ((state.vsstatus & SSTATUS_VS) == SSTATUS_VS) ||
           ((state.vsstatus & SSTATUS_XS) == SSTATUS_XS)) {
          state.vsstatus |= (xlen == 64 ? SSTATUS64_SD : SSTATUS32_SD);
       }
-      state.vsstatus = set_field(state.vsstatus, SSTATUS_UXL, xlen_to_uxl(max_xlen));
       break;
     }
     case CSR_VSIE: {
@@ -1429,6 +1520,56 @@ reg_t processor_t::get_csr(int which, insn_t insn, bool write, bool peek)
 
   switch (which)
   {
+    case CSR_U_TAG_SIZE:
+      ret((state.tag_mode == 0) ? 0 : (state.tag_mode == 1) ? 64 : 128);
+      break;
+    case CSR_U_TAG_MODE:
+      ret(state.tag_mode);
+      break;
+
+    case CSR_U_MEID:
+      ret(state.meid);
+      break;
+    case CSR_U_TCS:
+      ret(state.tcs);
+      break;
+    case CSR_U_EAM:
+      ret(state.eam);
+      break;
+    case CSR_U_EMP:
+      ret(state.emp);
+      break;
+
+    case CSR_U_MPKEY_CONFIG:
+      ret(state.mpk_config);
+
+    case CSR_U_TAG_STORAGE_BASE:
+      ret(state.tag_storage_base);
+      break;
+    case CSR_U_TAG_DRAM_BASE:
+      ret(state.tag_dram_base);
+      break;
+    case CSR_U_TAG_CONTROL:
+      ret(state.tag_control);
+      break;
+    /*
+    case CSR_U_TAG_ADDR:
+      ret(state.tag_addr);
+      break;
+    case CSR_U_TAG_VALUE_L:
+      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_L));
+      break;
+    case CSR_U_TAG_VALUE_H:
+      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_H));
+      break;
+    case CSR_U_TAG_VALUE_EL:
+      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_EL));
+      break;
+    case CSR_U_TAG_VALUE_EH:
+      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_EH));
+      break;
+    */
+
     case CSR_MENTROPY:
       if(!supports_extension('K'))
           break;

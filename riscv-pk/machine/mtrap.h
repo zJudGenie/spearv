@@ -31,7 +31,7 @@ static inline int xlen()
   return read_const_csr(misa) < 0 ? 64 : 32;
 }
 
-extern uintptr_t mem_size;
+extern uintptr_t mem_size_final, mem_size, mem_base;
 extern volatile uint64_t* mtime;
 extern volatile uint32_t* plic_priorities;
 extern size_t plic_ndevs;
@@ -76,6 +76,21 @@ void boot_other_hart(uintptr_t dtb);
 static inline void wfi()
 {
   asm volatile ("wfi" ::: "memory");
+}
+
+
+static char* _exception_cause_to_str(unsigned long mcause)
+{
+  char* cause = "???";
+  switch(mcause)
+  {
+    #define DECLARE_CAUSE(name, causeid) case causeid: cause = #name; break;
+    #include "encoding.h"
+    #undef DECLARE_CAUSE
+    default:
+      break;
+  };
+  return cause;
 }
 
 #endif // !__ASSEMBLER__

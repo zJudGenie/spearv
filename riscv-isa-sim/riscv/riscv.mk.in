@@ -17,6 +17,7 @@ riscv_hdrs = \
 	disasm.h \
 	dts.h \
 	mmu.h \
+	tag.h \
 	processor.h \
 	sim.h \
 	simif.h \
@@ -48,6 +49,7 @@ riscv_srcs = \
 	trap.cc \
 	cachesim.cc \
 	mmu.cc \
+	tag.cc \
 	disasm.cc \
 	extension.cc \
 	extensions.cc \
@@ -68,6 +70,7 @@ riscv_gen_hdrs = \
 
 
 riscv_insn_ext_i = \
+	mtrap \
 	add \
 	addi \
 	addiw \
@@ -919,6 +922,7 @@ riscv_insn_priv = \
 	ecall \
 	mret \
 	sfence_vma \
+	fence_t \
 	sret \
 	wfi \
 
@@ -930,13 +934,14 @@ riscv_insn_list = \
 	$(riscv_insn_ext_m) \
 	$(riscv_insn_ext_f) \
 	$(riscv_insn_ext_d) \
-	$(riscv_insn_ext_zfh) \
-	$(riscv_insn_ext_q) \
-	$(riscv_insn_ext_b) \
-    $(riscv_insn_ext_k) \
-	$(if $(HAVE_INT128),$(riscv_insn_ext_v),) \
-	$(riscv_insn_ext_h) \
 	$(riscv_insn_priv) \
+	#note: commented out insns we dont use to speed up compilation \
+	#$(if $(HAVE_INT128),$(riscv_insn_ext_v),) \
+	#$(riscv_insn_ext_zfh) \
+	#$(riscv_insn_ext_b) \
+	#$(riscv_insn_ext_h) \
+	#$(riscv_insn_ext_q) \
+	#$(riscv_insn_ext_k) \
 
 riscv_gen_srcs = \
 	$(addsuffix .cc,$(riscv_insn_list))

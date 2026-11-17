@@ -82,6 +82,8 @@ void sim_t::interactive()
   funcs["q"] = funcs["quit"];
   funcs["help"] = &sim_t::interactive_help;
   funcs["h"] = funcs["help"];
+  funcs["debugnoise"] = &sim_t::interactive_debug_level;
+  funcs["dn"] = funcs["debugnoise"];
 
   while (!done())
   {
@@ -140,8 +142,23 @@ void sim_t::interactive_help(const std::string& cmd, const std::vector<std::stri
     "q                                 Alias for quit\n"
     "help                            # This screen!\n"
     "h                                 Alias for help\n"
+    "debugnoise <level>              # Set the debug log level on the fly!\n"
+    "dn  <level>                       Alias for debugnoise\n"
     "Note: Hitting enter is the same as: run 1\n"
     << std::flush;
+}
+
+void sim_t::interactive_debug_level(const std::string& cmd, const std::vector<std::string>& args)
+{
+  if(args.size() != 1) {
+    printf("wrong number of arguments\n");
+    throw trap_interactive();
+  }
+  char *ptr;
+
+  fprintf(stderr, "Setting debug log level from '%zu' ", debug_log_level);
+  debug_log_level = strtoul((args[0]).c_str(), &ptr, 10);
+  fprintf(stderr, "to '%zu' \n", debug_log_level);
 }
 
 void sim_t::interactive_run_noisy(const std::string& cmd, const std::vector<std::string>& args)

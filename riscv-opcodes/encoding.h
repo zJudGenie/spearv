@@ -3,6 +3,10 @@
 #ifndef RISCV_CSR_ENCODING_H
 #define RISCV_CSR_ENCODING_H
 
+//TODO
+//#define TSTATUS_EN          0x00000001
+
+
 #define MSTATUS_UIE         0x00000001
 #define MSTATUS_SIE         0x00000002
 #define MSTATUS_HIE         0x00000004
@@ -206,6 +210,12 @@
 #define IRQ_COP      12
 #define IRQ_HOST     13
 
+#define DEFAULT_RSTVEC     0x00001000
+#define CLINT_BASE         0x02000000
+#define CLINT_SIZE         0x000c0000
+#define EXT_IO_BASE        0x40000000
+#define DRAM_BASE          0x80000000
+
 /* page table entry (PTE) fields */
 #define PTE_V     0x001 /* Valid */
 #define PTE_R     0x002 /* Read */
@@ -216,7 +226,7 @@
 #define PTE_A     0x040 /* Accessed */
 #define PTE_D     0x080 /* Dirty */
 #define PTE_SOFT  0x300 /* Reserved for Software */
-#define PTE_N     0x4000000000000000 /* Zsn: NAPOT translation contiguity */
+#define PTE_N     0x4000000000000000 /* Svnapot: NAPOT translation contiguity */
 
 #define PTE_PPN_SHIFT 10
 

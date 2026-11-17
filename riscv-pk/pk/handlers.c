@@ -93,13 +93,26 @@ static void handle_syscall(trapframe_t* tf)
   tf->epc += 4;
 }
 
+extern long timer_period;
+extern long _sys_set_timer(long time, long period);
 static void handle_interrupt(trapframe_t* tf)
 {
-  clear_csr(sip, SIP_SSIP);
+  printk("[PK] handle_interrupt\n");
+  if(read_csr(sip) & SIP_STIP){
+    printk("[PK] handle_interrupt: SIP_STIP\n");
+    if(timer_period){
+      _sys_set_timer(0, timer_period);
+    }
+    clear_csr(sip, SIP_STIP);
+  }else{
+    printk("[PK] handle_interrupt: SIP_SSIP\n");
+    clear_csr(sip, SIP_SSIP);
+  }
 }
 
 void handle_trap(trapframe_t* tf)
 {
+  //printk("[PK] handle_trap cause=0x%lx\n", tf->cause);
   if ((intptr_t)tf->cause < 0)
     return handle_interrupt(tf);
 
@@ -120,6 +133,7 @@ void handle_trap(trapframe_t* tf)
     [CAUSE_STORE_PAGE_FAULT] = handle_fault_store,
   };
 
+  //printk("[PK] Trap handler: tf->cause = %x\n", tf->cause); 
   kassert(tf->cause < ARRAY_SIZE(trap_handlers) && trap_handlers[tf->cause]);
 
   trap_handlers[tf->cause](tf);

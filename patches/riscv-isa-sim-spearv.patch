@@ -1,0 +1,1539 @@
+diff --git a/fesvr/fesvr.mk.in b/fesvr/fesvr.mk.in
+index 079c1b1..afd95ab 100644
+--- a/fesvr/fesvr.mk.in
++++ b/fesvr/fesvr.mk.in
+@@ -41,3 +41,6 @@ fesvr_srcs = \
+ 
+ fesvr_install_prog_srcs = \
+   elf2hex.cc \
++
++fesvr_install_shared_lib = yes
++
+diff --git a/riscv/common.h b/riscv/common.h
+index d593df2..e85c499 100644
+--- a/riscv/common.h
++++ b/riscv/common.h
+@@ -13,4 +13,25 @@
+ 
+ #define NOINLINE __attribute__ ((noinline))
+ 
++/////////////////////////////// DEBUG Printing stuff
++#define COLOR_RED     "\x1b[31m"
++#define COLOR_GREEN   "\x1b[32m"
++#define COLOR_YELLOW  "\x1b[33m"
++#define COLOR_BLUE    "\x1b[34m"
++#define COLOR_MAGENTA "\x1b[35m"
++#define COLOR_CYAN    "\x1b[36m"
++#define COLOR_RESET   "\x1b[0m"
++#define COLOR_INFO    COLOR_CYAN
++
++extern size_t debug_log_level;
++//#define ERROR_FAIL2(MESSAGE, ...) do { if(debug_log_level >=  1) { fprintf(stderr, COLOR_RED    "%s:%d: " MESSAGE COLOR_RESET, __FILE__, __LINE__, ##__VA_ARGS__); if(errno){perror(NULL);} } exit(EXIT_FAILURE);} while (0)
++#define ERROR_FAIL(MESSAGE, ...)  do { if(debug_log_level >=  1) { fprintf(stderr, COLOR_RED    "[SPIKE] %s: " MESSAGE COLOR_RESET, __func__, ##__VA_ARGS__); if(errno){perror(NULL);} } exit(EXIT_FAILURE);} while (0)
++#define ERROR(MESSAGE, ...)       do { if(debug_log_level >=  2) { fprintf(stderr, COLOR_RED    "[SPIKE] %s: " MESSAGE COLOR_RESET, __func__, ##__VA_ARGS__); }} while (0)
++#define WARNING(MESSAGE, ...)     do { if(debug_log_level >=  3) { fprintf(stderr, COLOR_YELLOW "[SPIKE] %s: " MESSAGE COLOR_RESET, __func__, ##__VA_ARGS__); }} while (0)
++#define INFO(MESSAGE, ...)        do { if(debug_log_level >=  5) { fprintf(stderr, COLOR_INFO   "[SPIKE] %s: " MESSAGE COLOR_RESET, __func__, ##__VA_ARGS__); }} while (0)
++#define INFO2(MESSAGE, ...)        do { if(debug_log_level >=  5) { fprintf(stderr, COLOR_INFO   MESSAGE COLOR_RESET, ##__VA_ARGS__); }} while (0)
++
++//#define VERBOSE(MESSAGE, ...)     do { if(debug_log_level >=  8) { fprintf(stderr, COLOR_CYAN   "%s: " MESSAGE COLOR_RESET, __func__, ##__VA_ARGS__); }} while (0)
++//#define DEBUG(MESSAGE, ...)       do { if(debug_log_level >= 10) { fprintf(stderr, COLOR_CYAN   "%s: " MESSAGE COLOR_RESET, __func__, ##__VA_ARGS__); }} while (0)
++
+ #endif
+diff --git a/riscv/decode.h b/riscv/decode.h
+index 3f145f5..2f1052e 100644
+--- a/riscv/decode.h
++++ b/riscv/decode.h
+@@ -201,6 +201,16 @@ private:
+ # define WRITE_VSTATUS STATE.log_reg_write[3] = {0, 0};
+ #endif
+ 
++
++#define REQUIRE_TAG(addr, require_tag, mask) ({ \
++    if (MMU.load_tag(addr) & (mask) != (require_tag) & (mask)) { \
++      throw trap_tag_mismatch(addr); \
++    } \
++})
++
++
++
++
+ // RVC macros
+ #define WRITE_RVC_RS1S(value) WRITE_REG(insn.rvc_rs1s(), value)
+ #define WRITE_RVC_RS2S(value) WRITE_REG(insn.rvc_rs2s(), value)
+@@ -217,13 +227,9 @@ private:
+ #define FRS1 READ_FREG(insn.rs1())
+ #define FRS2 READ_FREG(insn.rs2())
+ #define FRS3 READ_FREG(insn.rs3())
+-#define dirty_mstatus(bits) ({ reg_t dirties = (bits) | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD); \
+-                               STATE.mstatus |= dirties; \
+-                               if (STATE.v) STATE.vsstatus |= dirties; \
+-                            })
+-#define dirty_fp_state  dirty_mstatus(MSTATUS_FS)
+-#define dirty_ext_state dirty_mstatus(MSTATUS_XS)
+-#define dirty_vs_state  dirty_mstatus(MSTATUS_VS)
++#define dirty_fp_state (STATE.mstatus |= MSTATUS_FS | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD))
++#define dirty_ext_state (STATE.mstatus |= MSTATUS_XS | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD))
++#define dirty_vs_state (STATE.mstatus |= MSTATUS_VS | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD))
+ #define DO_WRITE_FREG(reg, value) (STATE.FPR.write(reg, value), dirty_fp_state)
+ #define WRITE_FRD(value) WRITE_FREG(insn.rd(), value)
+  
+@@ -246,9 +252,10 @@ private:
+ #define require_extension(s) require(p->supports_extension(s))
+ #define require_either_extension(A,B) require(p->supports_extension(A) || p->supports_extension(B));
+ #define require_impl(s) require(p->supports_impl(s))
+-#define require_fp require(((STATE.mstatus & MSTATUS_FS) != 0) && ((STATE.v == 0) || ((STATE.vsstatus & SSTATUS_FS) != 0)))
+-#define require_accelerator require(((STATE.mstatus & MSTATUS_XS) != 0) && ((STATE.v == 0) || ((STATE.vsstatus & SSTATUS_XS) != 0)))
+-#define require_vector_vs require(((STATE.mstatus & MSTATUS_VS) != 0) && ((STATE.v == 0) || ((STATE.vsstatus & SSTATUS_VS) != 0)))
++#define require_fp require((((STATE.mstatus & MSTATUS_FS) != 0) && (STATE.v == 0)) || (((STATE.mstatus & MSTATUS_FS) != 0) && ((STATE.vsstatus & SSTATUS_FS) != 0) && STATE.v))
++#define require_accelerator require((STATE.mstatus & MSTATUS_XS) != 0)
++
++#define require_vector_vs require((((STATE.mstatus & MSTATUS_VS) != 0) && (STATE.v == 0)) || (((STATE.mstatus & MSTATUS_VS) != 0) && ((STATE.vsstatus & SSTATUS_VS) != 0) && STATE.v))
+ #define require_vector(alu) \
+   do { \
+     require_vector_vs; \
+diff --git a/riscv/encoding.h b/riscv/encoding.h
+index 3c5a473..e39f550 100644
+--- a/riscv/encoding.h
++++ b/riscv/encoding.h
+@@ -1,6 +1,6 @@
+ /*
+  * This file is auto-generated by running 'make ../riscv-isa-sim/riscv/encoding.h' in
+- * https://github.com/riscv/riscv-opcodes (e8f0392)
++ * https://github.com/riscv/riscv-opcodes (00ca2a90)
+  */
+ 
+ /* See LICENSE for license details. */
+@@ -8,6 +8,10 @@
+ #ifndef RISCV_CSR_ENCODING_H
+ #define RISCV_CSR_ENCODING_H
+ 
++//TODO
++//#define TSTATUS_EN          0x00000001
++
++
+ #define MSTATUS_UIE         0x00000001
+ #define MSTATUS_SIE         0x00000002
+ #define MSTATUS_HIE         0x00000004
+@@ -928,76 +932,6 @@
+ #define MASK_BFPW  0xfe00707f
+ #define MATCH_XPERM_W 0x28000033
+ #define MASK_XPERM_W  0xfe00707f
+-// Crypto ISE Begin
+-#define MASK_POLLENTROPY  0xfffff07f
+-#define MATCH_POLLENTROPY 0xf1500073
+-#define MASK_GETNOISE  0xfffff07f
+-#define MATCH_GETNOISE 0x7a900073
+-#define MASK_SM4ED  0x3e007fff
+-#define MATCH_SM4ED 0x30000033
+-#define MASK_SM4KS  0x3e007fff
+-#define MATCH_SM4KS 0x34000033
+-#define MASK_SM3P0  0xfff0707f
+-#define MATCH_SM3P0 0x10801013
+-#define MASK_SM3P1  0xfff0707f
+-#define MATCH_SM3P1 0x10901013
+-#define MASK_SHA256SUM0  0xfff0707f
+-#define MATCH_SHA256SUM0 0x10001013
+-#define MASK_SHA256SUM1  0xfff0707f
+-#define MATCH_SHA256SUM1 0x10101013
+-#define MASK_SHA256SIG0  0xfff0707f
+-#define MATCH_SHA256SIG0 0x10201013
+-#define MASK_SHA256SIG1  0xfff0707f
+-#define MATCH_SHA256SIG1 0x10301013
+-#define MASK_SHA512SUM0R  0xfe00707f
+-#define MATCH_SHA512SUM0R 0x50000033
+-#define MASK_SHA512SUM1R  0xfe00707f
+-#define MATCH_SHA512SUM1R 0x52000033
+-#define MASK_SHA512SIG0L  0xfe00707f
+-#define MATCH_SHA512SIG0L 0x54000033
+-#define MASK_SHA512SIG0H  0xfe00707f
+-#define MATCH_SHA512SIG0H 0x5c000033
+-#define MASK_SHA512SIG1L  0xfe00707f
+-#define MATCH_SHA512SIG1L 0x56000033
+-#define MASK_SHA512SIG1H  0xfe00707f
+-#define MATCH_SHA512SIG1H 0x5e000033
+-#define MASK_AES64KS1I  0xff00707f
+-#define MATCH_AES64KS1I 0x31001013
+-#define MASK_AES64IM  0xfff0707f
+-#define MATCH_AES64IM 0x30001013
+-#define MASK_AES64KS2  0xfe00707f
+-#define MATCH_AES64KS2 0x7e000033
+-#define MASK_AES32ESMI  0x3e007fff
+-#define MATCH_AES32ESMI 0x36000033
+-#define MASK_AES32ESI  0x3e007fff
+-#define MATCH_AES32ESI 0x32000033
+-#define MASK_AES32DSMI  0x3e007fff
+-#define MATCH_AES32DSMI 0x3e000033
+-#define MASK_AES32DSI  0x3e007fff
+-#define MATCH_AES32DSI 0x3a000033
+-#define MASK_AES64KS1I  0xff00707f
+-#define MATCH_AES64KS1I 0x31001013
+-#define MASK_AES64IM  0xfff0707f
+-#define MATCH_AES64IM 0x30001013
+-#define MASK_AES64KS2  0xfe00707f
+-#define MATCH_AES64KS2 0x7e000033
+-#define MASK_AES64ESM  0xfe00707f
+-#define MATCH_AES64ESM 0x36000033
+-#define MASK_AES64ES  0xfe00707f
+-#define MATCH_AES64ES 0x32000033
+-#define MASK_AES64DSM  0xfe00707f
+-#define MATCH_AES64DSM 0x3e000033
+-#define MASK_AES64DS  0xfe00707f
+-#define MATCH_AES64DS 0x3a000033
+-#define MASK_SHA512SUM0  0xfff0707f
+-#define MATCH_SHA512SUM0 0x10401013
+-#define MASK_SHA512SUM1  0xfff0707f
+-#define MATCH_SHA512SUM1 0x10501013
+-#define MASK_SHA512SIG0  0xfff0707f
+-#define MATCH_SHA512SIG0 0x10601013
+-#define MASK_SHA512SIG1  0xfff0707f
+-#define MATCH_SHA512SIG1 0x10701013
+-// Crypto ISE End
+ #define MATCH_ECALL 0x73
+ #define MASK_ECALL  0xffffffff
+ #define MATCH_EBREAK 0x100073
+@@ -1098,6 +1032,68 @@
+ #define MASK_FCVT_H_L  0xfff0007f
+ #define MATCH_FCVT_H_LU 0xd4300053
+ #define MASK_FCVT_H_LU  0xfff0007f
++#define MATCH_POLLENTROPY 0xf1500073
++#define MASK_POLLENTROPY  0xfffff07f
++#define MATCH_GETNOISE 0x7a900073
++#define MASK_GETNOISE  0xfffff07f
++#define MATCH_SM4ED 0x30000033
++#define MASK_SM4ED  0x3e007fff
++#define MATCH_SM4KS 0x34000033
++#define MASK_SM4KS  0x3e007fff
++#define MATCH_SM3P0 0x10801013
++#define MASK_SM3P0  0xfff0707f
++#define MATCH_SM3P1 0x10901013
++#define MASK_SM3P1  0xfff0707f
++#define MATCH_SHA256SUM0 0x10001013
++#define MASK_SHA256SUM0  0xfff0707f
++#define MATCH_SHA256SUM1 0x10101013
++#define MASK_SHA256SUM1  0xfff0707f
++#define MATCH_SHA256SIG0 0x10201013
++#define MASK_SHA256SIG0  0xfff0707f
++#define MATCH_SHA256SIG1 0x10301013
++#define MASK_SHA256SIG1  0xfff0707f
++#define MATCH_AES32ESMI 0x36000033
++#define MASK_AES32ESMI  0x3e007fff
++#define MATCH_AES32ESI 0x32000033
++#define MASK_AES32ESI  0x3e007fff
++#define MATCH_AES32DSMI 0x3e000033
++#define MASK_AES32DSMI  0x3e007fff
++#define MATCH_AES32DSI 0x3a000033
++#define MASK_AES32DSI  0x3e007fff
++#define MATCH_SHA512SUM0R 0x50000033
++#define MASK_SHA512SUM0R  0xfe00707f
++#define MATCH_SHA512SUM1R 0x52000033
++#define MASK_SHA512SUM1R  0xfe00707f
++#define MATCH_SHA512SIG0L 0x54000033
++#define MASK_SHA512SIG0L  0xfe00707f
++#define MATCH_SHA512SIG0H 0x5c000033
++#define MASK_SHA512SIG0H  0xfe00707f
++#define MATCH_SHA512SIG1L 0x56000033
++#define MASK_SHA512SIG1L  0xfe00707f
++#define MATCH_SHA512SIG1H 0x5e000033
++#define MASK_SHA512SIG1H  0xfe00707f
++#define MATCH_AES64KS1I 0x31001013
++#define MASK_AES64KS1I  0xff00707f
++#define MATCH_AES64IM 0x30001013
++#define MASK_AES64IM  0xfff0707f
++#define MATCH_AES64KS2 0x7e000033
++#define MASK_AES64KS2  0xfe00707f
++#define MATCH_AES64ESM 0x36000033
++#define MASK_AES64ESM  0xfe00707f
++#define MATCH_AES64ES 0x32000033
++#define MASK_AES64ES  0xfe00707f
++#define MATCH_AES64DSM 0x3e000033
++#define MASK_AES64DSM  0xfe00707f
++#define MATCH_AES64DS 0x3a000033
++#define MASK_AES64DS  0xfe00707f
++#define MATCH_SHA512SUM0 0x10401013
++#define MASK_SHA512SUM0  0xfff0707f
++#define MATCH_SHA512SUM1 0x10501013
++#define MASK_SHA512SUM1  0xfff0707f
++#define MATCH_SHA512SIG0 0x10601013
++#define MASK_SHA512SIG0  0xfff0707f
++#define MATCH_SHA512SIG1 0x10701013
++#define MASK_SHA512SIG1  0xfff0707f
+ #define MATCH_C_NOP 0x1
+ #define MASK_C_NOP  0xffff
+ #define MATCH_C_ADDI16SP 0x6101
+@@ -1236,6 +1232,14 @@
+ #define MASK_CUSTOM3_RD_RS1  0x707f
+ #define MATCH_CUSTOM3_RD_RS1_RS2 0x707b
+ #define MASK_CUSTOM3_RD_RS1_RS2  0x707f
++#define MATCH_MTRAP 0x7b
++#define MASK_MTRAP  0x707f
++#define MATCH_RDTLB 0x307b
++#define MASK_RDTLB  0x707f
++#define MATCH_RITLB 0x407b
++#define MASK_RITLB  0x707f
++#define MATCH_FENCE_T 0xb
++#define MASK_FENCE_T  0x7f
+ #define MATCH_VSETIVLI 0xc0007057
+ #define MASK_VSETIVLI  0xc000707f
+ #define MATCH_VSETVLI 0x7057
+@@ -2157,6 +2161,16 @@
+ #define CSR_UCAUSE 0x42
+ #define CSR_UTVAL 0x43
+ #define CSR_UIP 0x44
++#define CSR_U_TAG_SIZE 0x66
++#define CSR_U_TAG_MODE 0x67
++#define CSR_U_TAG_STORAGE_BASE 0x68
++#define CSR_U_MPKEY_CONFIG 0x69
++#define CSR_U_EAM 0x70
++#define CSR_U_MEID 0x71
++#define CSR_U_TLB_SIZE 0x72
++#define CSR_U_EMP 0x73
++#define CSR_U_TCS 0x74
++#define CSR_U_TAG_CONTROL 0x75
+ #define CSR_CYCLE 0xc00
+ #define CSR_TIME 0xc01
+ #define CSR_INSTRET 0xc02
+@@ -2438,6 +2452,13 @@
+ #define CAUSE_LOAD_GUEST_PAGE_FAULT 0x15
+ #define CAUSE_VIRTUAL_INSTRUCTION 0x16
+ #define CAUSE_STORE_GUEST_PAGE_FAULT 0x17
++#define CAUSE_MPKEY_MISMATCH_FAULT 0x19
++#define CAUSE_ENCLAVE_ACCESS_FAULT 0x1a
++#define CAUSE_MEID_MISMATCH_FAULT 0x1b
++#define CAUSE_ENC_INTEGRITY_FAULT 0x1c
++#define CAUSE_SATP_MODE_CHANGE 0x1d
++#define CAUSE_ST_IMM_FAULT 0x1e
++#define CAUSE_HPCE_FAULT 0x1f
+ #endif
+ #ifdef DECLARE_INSN
+ DECLARE_INSN(slli_rv32, MATCH_SLLI_RV32, MASK_SLLI_RV32)
+@@ -2761,58 +2782,6 @@ DECLARE_INSN(packw, MATCH_PACKW, MASK_PACKW)
+ DECLARE_INSN(packuw, MATCH_PACKUW, MASK_PACKUW)
+ DECLARE_INSN(bfpw, MATCH_BFPW, MASK_BFPW)
+ DECLARE_INSN(xperm_w, MATCH_XPERM_W, MASK_XPERM_W)
+-DECLARE_INSN(sm4ed, MATCH_SM4ED, MASK_SM4ED)
+-DECLARE_INSN(sm4ks, MATCH_SM4KS, MASK_SM4KS)
+-DECLARE_INSN(aes64ks1i, MATCH_AES64KS1I, MASK_AES64KS1I)
+-DECLARE_INSN(aes64ks2, MATCH_AES64KS2, MASK_AES64KS2)
+-DECLARE_INSN(aes64im, MATCH_AES64IM, MASK_AES64IM)
+-DECLARE_INSN(aes64es, MATCH_AES64ES, MASK_AES64ES)
+-DECLARE_INSN(aes64esm, MATCH_AES64ESM, MASK_AES64ESM)
+-DECLARE_INSN(aes64ds, MATCH_AES64DS, MASK_AES64DS)
+-DECLARE_INSN(aes64dsm, MATCH_AES64DSM, MASK_AES64DSM)
+-DECLARE_RV64_ONLY(aes64ks1i)
+-DECLARE_RV64_ONLY(aes64ks2)
+-DECLARE_RV64_ONLY(aes64im)
+-DECLARE_RV64_ONLY(aes64es)
+-DECLARE_RV64_ONLY(aes64esm)
+-DECLARE_RV64_ONLY(aes64ds)
+-DECLARE_RV64_ONLY(aes64dsm)
+-DECLARE_INSN(aes32esi, MATCH_AES32ESI, MASK_AES32ESI)
+-DECLARE_INSN(aes32esmi, MATCH_AES32ESMI, MASK_AES32ESMI)
+-DECLARE_INSN(aes32dsi, MATCH_AES32DSI, MASK_AES32DSI)
+-DECLARE_INSN(aes32dsmi, MATCH_AES32DSMI, MASK_AES32DSMI)
+-DECLARE_RV32_ONLY(aes32esi)
+-DECLARE_RV32_ONLY(aes32esmi)
+-DECLARE_RV32_ONLY(aes32dsi)
+-DECLARE_RV32_ONLY(aes32dsmi)
+-DECLARE_INSN(sha256sig0, MATCH_SHA256SIG0, MASK_SHA256SIG0)
+-DECLARE_INSN(sha256sig1, MATCH_SHA256SIG1, MASK_SHA256SIG1)
+-DECLARE_INSN(sha256sum0, MATCH_SHA256SUM0, MASK_SHA256SUM0)
+-DECLARE_INSN(sha256sum1, MATCH_SHA256SUM1, MASK_SHA256SUM1)
+-DECLARE_INSN(sm3p0, MATCH_SM3P0, MASK_SM3P0)
+-DECLARE_INSN(sm3p1, MATCH_SM3P1, MASK_SM3P1)
+-DECLARE_INSN(sha512sig0l, MATCH_SHA512SIG0L, MASK_SHA512SIG0L)
+-DECLARE_INSN(sha512sig0h, MATCH_SHA512SIG0H, MASK_SHA512SIG0H)
+-DECLARE_INSN(sha512sig1l, MATCH_SHA512SIG1L, MASK_SHA512SIG1L)
+-DECLARE_INSN(sha512sig1h, MATCH_SHA512SIG1H, MASK_SHA512SIG1H)
+-DECLARE_INSN(sha512sum0r, MATCH_SHA512SUM0R, MASK_SHA512SUM0R)
+-DECLARE_INSN(sha512sum1r, MATCH_SHA512SUM1R, MASK_SHA512SUM1R)
+-DECLARE_RV32_ONLY(sha512sig0l)
+-DECLARE_RV32_ONLY(sha512sig0h)
+-DECLARE_RV32_ONLY(sha512sig1l)
+-DECLARE_RV32_ONLY(sha512sig1h)
+-DECLARE_RV32_ONLY(sha512sum0r)
+-DECLARE_RV32_ONLY(sha512sum1r)
+-DECLARE_INSN(sha512sig0, MATCH_SHA512SIG0, MASK_SHA512SIG0)
+-DECLARE_INSN(sha512sig1, MATCH_SHA512SIG1, MASK_SHA512SIG1)
+-DECLARE_INSN(sha512sum0, MATCH_SHA512SUM0, MASK_SHA512SUM0)
+-DECLARE_INSN(sha512sum1, MATCH_SHA512SUM1, MASK_SHA512SUM1)
+-DECLARE_RV64_ONLY(sha512sig0)
+-DECLARE_RV64_ONLY(sha512sig1)
+-DECLARE_RV64_ONLY(sha512sum0)
+-DECLARE_RV64_ONLY(sha512sum1)
+-DECLARE_INSN(pollentropy, MATCH_POLLENTROPY, MASK_POLLENTROPY)
+-DECLARE_INSN(getnoise, MATCH_GETNOISE, MASK_GETNOISE)
+ DECLARE_INSN(ecall, MATCH_ECALL, MASK_ECALL)
+ DECLARE_INSN(ebreak, MATCH_EBREAK, MASK_EBREAK)
+ DECLARE_INSN(uret, MATCH_URET, MASK_URET)
+@@ -2863,6 +2832,37 @@ DECLARE_INSN(fcvt_l_h, MATCH_FCVT_L_H, MASK_FCVT_L_H)
+ DECLARE_INSN(fcvt_lu_h, MATCH_FCVT_LU_H, MASK_FCVT_LU_H)
+ DECLARE_INSN(fcvt_h_l, MATCH_FCVT_H_L, MASK_FCVT_H_L)
+ DECLARE_INSN(fcvt_h_lu, MATCH_FCVT_H_LU, MASK_FCVT_H_LU)
++DECLARE_INSN(pollentropy, MATCH_POLLENTROPY, MASK_POLLENTROPY)
++DECLARE_INSN(getnoise, MATCH_GETNOISE, MASK_GETNOISE)
++DECLARE_INSN(sm4ed, MATCH_SM4ED, MASK_SM4ED)
++DECLARE_INSN(sm4ks, MATCH_SM4KS, MASK_SM4KS)
++DECLARE_INSN(sm3p0, MATCH_SM3P0, MASK_SM3P0)
++DECLARE_INSN(sm3p1, MATCH_SM3P1, MASK_SM3P1)
++DECLARE_INSN(sha256sum0, MATCH_SHA256SUM0, MASK_SHA256SUM0)
++DECLARE_INSN(sha256sum1, MATCH_SHA256SUM1, MASK_SHA256SUM1)
++DECLARE_INSN(sha256sig0, MATCH_SHA256SIG0, MASK_SHA256SIG0)
++DECLARE_INSN(sha256sig1, MATCH_SHA256SIG1, MASK_SHA256SIG1)
++DECLARE_INSN(aes32esmi, MATCH_AES32ESMI, MASK_AES32ESMI)
++DECLARE_INSN(aes32esi, MATCH_AES32ESI, MASK_AES32ESI)
++DECLARE_INSN(aes32dsmi, MATCH_AES32DSMI, MASK_AES32DSMI)
++DECLARE_INSN(aes32dsi, MATCH_AES32DSI, MASK_AES32DSI)
++DECLARE_INSN(sha512sum0r, MATCH_SHA512SUM0R, MASK_SHA512SUM0R)
++DECLARE_INSN(sha512sum1r, MATCH_SHA512SUM1R, MASK_SHA512SUM1R)
++DECLARE_INSN(sha512sig0l, MATCH_SHA512SIG0L, MASK_SHA512SIG0L)
++DECLARE_INSN(sha512sig0h, MATCH_SHA512SIG0H, MASK_SHA512SIG0H)
++DECLARE_INSN(sha512sig1l, MATCH_SHA512SIG1L, MASK_SHA512SIG1L)
++DECLARE_INSN(sha512sig1h, MATCH_SHA512SIG1H, MASK_SHA512SIG1H)
++DECLARE_INSN(aes64ks1i, MATCH_AES64KS1I, MASK_AES64KS1I)
++DECLARE_INSN(aes64im, MATCH_AES64IM, MASK_AES64IM)
++DECLARE_INSN(aes64ks2, MATCH_AES64KS2, MASK_AES64KS2)
++DECLARE_INSN(aes64esm, MATCH_AES64ESM, MASK_AES64ESM)
++DECLARE_INSN(aes64es, MATCH_AES64ES, MASK_AES64ES)
++DECLARE_INSN(aes64dsm, MATCH_AES64DSM, MASK_AES64DSM)
++DECLARE_INSN(aes64ds, MATCH_AES64DS, MASK_AES64DS)
++DECLARE_INSN(sha512sum0, MATCH_SHA512SUM0, MASK_SHA512SUM0)
++DECLARE_INSN(sha512sum1, MATCH_SHA512SUM1, MASK_SHA512SUM1)
++DECLARE_INSN(sha512sig0, MATCH_SHA512SIG0, MASK_SHA512SIG0)
++DECLARE_INSN(sha512sig1, MATCH_SHA512SIG1, MASK_SHA512SIG1)
+ DECLARE_INSN(c_nop, MATCH_C_NOP, MASK_C_NOP)
+ DECLARE_INSN(c_addi16sp, MATCH_C_ADDI16SP, MASK_C_ADDI16SP)
+ DECLARE_INSN(c_jr, MATCH_C_JR, MASK_C_JR)
+@@ -2932,6 +2932,10 @@ DECLARE_INSN(custom3_rs1_rs2, MATCH_CUSTOM3_RS1_RS2, MASK_CUSTOM3_RS1_RS2)
+ DECLARE_INSN(custom3_rd, MATCH_CUSTOM3_RD, MASK_CUSTOM3_RD)
+ DECLARE_INSN(custom3_rd_rs1, MATCH_CUSTOM3_RD_RS1, MASK_CUSTOM3_RD_RS1)
+ DECLARE_INSN(custom3_rd_rs1_rs2, MATCH_CUSTOM3_RD_RS1_RS2, MASK_CUSTOM3_RD_RS1_RS2)
++DECLARE_INSN(mtrap, MATCH_MTRAP, MASK_MTRAP)
++DECLARE_INSN(rdtlb, MATCH_RDTLB, MASK_RDTLB)
++DECLARE_INSN(ritlb, MATCH_RITLB, MASK_RITLB)
++DECLARE_INSN(fence_t, MATCH_FENCE_T, MASK_FENCE_T)
+ DECLARE_INSN(vsetivli, MATCH_VSETIVLI, MASK_VSETIVLI)
+ DECLARE_INSN(vsetvli, MATCH_VSETVLI, MASK_VSETVLI)
+ DECLARE_INSN(vsetvl, MATCH_VSETVL, MASK_VSETVL)
+@@ -3385,6 +3389,31 @@ DECLARE_INSN(vl1r_v, MATCH_VL1R_V, MASK_VL1R_V)
+ DECLARE_INSN(vl2r_v, MATCH_VL2R_V, MASK_VL2R_V)
+ DECLARE_INSN(vl4r_v, MATCH_VL4R_V, MASK_VL4R_V)
+ DECLARE_INSN(vl8r_v, MATCH_VL8R_V, MASK_VL8R_V)
++#ifdef DECLARE_RV32_ONLY
++DECLARE_RV32_ONLY(aes32esmi)
++DECLARE_RV32_ONLY(aes32esi)
++DECLARE_RV32_ONLY(aes32dsmi)
++DECLARE_RV32_ONLY(aes32dsi)
++DECLARE_RV32_ONLY(sha512sum0r)
++DECLARE_RV32_ONLY(sha512sum1r)
++DECLARE_RV32_ONLY(sha512sig0l)
++DECLARE_RV32_ONLY(sha512sig0h)
++DECLARE_RV32_ONLY(sha512sig1l)
++DECLARE_RV32_ONLY(sha512sig1h)
++#endif
++#ifdef DECLARE_RV64_ONLY
++DECLARE_RV64_ONLY(aes64ks1i)
++DECLARE_RV64_ONLY(aes64im)
++DECLARE_RV64_ONLY(aes64ks2)
++DECLARE_RV64_ONLY(aes64esm)
++DECLARE_RV64_ONLY(aes64es)
++DECLARE_RV64_ONLY(aes64dsm)
++DECLARE_RV64_ONLY(aes64ds)
++DECLARE_RV64_ONLY(sha512sum0)
++DECLARE_RV64_ONLY(sha512sum1)
++DECLARE_RV64_ONLY(sha512sig0)
++DECLARE_RV64_ONLY(sha512sig1)
++#endif
+ #endif
+ #ifdef DECLARE_CSR
+ DECLARE_CSR(fflags, CSR_FFLAGS)
+@@ -3402,6 +3431,16 @@ DECLARE_CSR(uepc, CSR_UEPC)
+ DECLARE_CSR(ucause, CSR_UCAUSE)
+ DECLARE_CSR(utval, CSR_UTVAL)
+ DECLARE_CSR(uip, CSR_UIP)
++DECLARE_CSR(u_tag_size, CSR_U_TAG_SIZE)
++DECLARE_CSR(u_tag_mode, CSR_U_TAG_MODE)
++DECLARE_CSR(u_tag_storage_base, CSR_U_TAG_STORAGE_BASE)
++DECLARE_CSR(u_mpkey_config, CSR_U_MPKEY_CONFIG)
++DECLARE_CSR(u_eam, CSR_U_EAM)
++DECLARE_CSR(u_meid, CSR_U_MEID)
++DECLARE_CSR(u_tlb_size, CSR_U_TLB_SIZE)
++DECLARE_CSR(u_emp, CSR_U_EMP)
++DECLARE_CSR(u_tcs, CSR_U_TCS)
++DECLARE_CSR(u_tag_control, CSR_U_TAG_CONTROL)
+ DECLARE_CSR(cycle, CSR_CYCLE)
+ DECLARE_CSR(time, CSR_TIME)
+ DECLARE_CSR(instret, CSR_INSTRET)
+@@ -3685,4 +3724,11 @@ DECLARE_CAUSE("fetch guest page fault", CAUSE_FETCH_GUEST_PAGE_FAULT)
+ DECLARE_CAUSE("load guest page fault", CAUSE_LOAD_GUEST_PAGE_FAULT)
+ DECLARE_CAUSE("virtual instruction", CAUSE_VIRTUAL_INSTRUCTION)
+ DECLARE_CAUSE("store guest page fault", CAUSE_STORE_GUEST_PAGE_FAULT)
++DECLARE_CAUSE("mpkey mismatch fault", CAUSE_MPKEY_MISMATCH_FAULT)
++DECLARE_CAUSE("enclave access fault", CAUSE_ENCLAVE_ACCESS_FAULT)
++DECLARE_CAUSE("meid mismatch fault", CAUSE_MEID_MISMATCH_FAULT)
++DECLARE_CAUSE("enc integrity fault", CAUSE_ENC_INTEGRITY_FAULT)
++DECLARE_CAUSE("satp mode change", CAUSE_SATP_MODE_CHANGE)
++DECLARE_CAUSE("st imm fault", CAUSE_ST_IMM_FAULT)
++DECLARE_CAUSE("hpce fault", CAUSE_HPCE_FAULT)
+ #endif
+diff --git a/riscv/insns/fence_t.h b/riscv/insns/fence_t.h
+new file mode 100644
+index 0000000..60b1d07
+--- /dev/null
++++ b/riscv/insns/fence_t.h
+@@ -0,0 +1,9 @@
++require_extension('S');
++require_impl(IMPL_MMU);
++if (STATE.v) {
++  if (STATE.prv == PRV_U || get_field(STATE.hstatus, HSTATUS_VTVM))
++    require_novirt();
++} else {
++  require_privilege(get_field(STATE.mstatus, MSTATUS_TVM) ? PRV_M : PRV_S);
++}
++MMU.flush_tlb(); //TODO
+diff --git a/riscv/insns/mtrap.h b/riscv/insns/mtrap.h
+new file mode 100644
+index 0000000..05c829e
+--- /dev/null
++++ b/riscv/insns/mtrap.h
+@@ -0,0 +1,3 @@
++require_rv64;
++//WRITE_RD(MMU.get_tagging()->load_tag(RS1 + insn.i_imm(), (mtag_access) 0));
++throw trap_illegal_instruction(0);
+diff --git a/riscv/insns/ppage.h b/riscv/insns/ppage.h
+new file mode 100644
+index 0000000..f0260e5
+--- /dev/null
++++ b/riscv/insns/ppage.h
+@@ -0,0 +1,2 @@
++require_rv64;
++throw trap_illegal_instruction(0);
+diff --git a/riscv/insns/rdtlb.h b/riscv/insns/rdtlb.h
+new file mode 100644
+index 0000000..2094280
+--- /dev/null
++++ b/riscv/insns/rdtlb.h
+@@ -0,0 +1,2 @@
++require_rv64;
++WRITE_RD(0xDEAD);
+diff --git a/riscv/insns/ritlb.h b/riscv/insns/ritlb.h
+new file mode 100644
+index 0000000..2094280
+--- /dev/null
++++ b/riscv/insns/ritlb.h
+@@ -0,0 +1,2 @@
++require_rv64;
++WRITE_RD(0xDEAD);
+diff --git a/riscv/insns/stag.h b/riscv/insns/stag.h
+new file mode 100644
+index 0000000..79af9b2
+--- /dev/null
++++ b/riscv/insns/stag.h
+@@ -0,0 +1,3 @@
++require_rv64;
++//MMU.get_tagging()->store_tag(RS1 + insn.s_imm(), RS2, (mtag_access) 0);
++throw trap_illegal_instruction(0);
+diff --git a/riscv/interactive.cc b/riscv/interactive.cc
+index 009eb82..bb6e214 100644
+--- a/riscv/interactive.cc
++++ b/riscv/interactive.cc
+@@ -82,6 +82,8 @@ void sim_t::interactive()
+   funcs["q"] = funcs["quit"];
+   funcs["help"] = &sim_t::interactive_help;
+   funcs["h"] = funcs["help"];
++  funcs["debugnoise"] = &sim_t::interactive_debug_level;
++  funcs["dn"] = funcs["debugnoise"];
+ 
+   while (!done())
+   {
+@@ -140,10 +142,25 @@ void sim_t::interactive_help(const std::string& cmd, const std::vector<std::stri
+     "q                                 Alias for quit\n"
+     "help                            # This screen!\n"
+     "h                                 Alias for help\n"
++    "debugnoise <level>              # Set the debug log level on the fly!\n"
++    "dn  <level>                       Alias for debugnoise\n"
+     "Note: Hitting enter is the same as: run 1\n"
+     << std::flush;
+ }
+ 
++void sim_t::interactive_debug_level(const std::string& cmd, const std::vector<std::string>& args)
++{
++  if(args.size() != 1) {
++    printf("wrong number of arguments\n");
++    throw trap_interactive();
++  }
++  char *ptr;
++
++  fprintf(stderr, "Setting debug log level from '%zu' ", debug_log_level);
++  debug_log_level = strtoul((args[0]).c_str(), &ptr, 10);
++  fprintf(stderr, "to '%zu' \n", debug_log_level);
++}
++
+ void sim_t::interactive_run_noisy(const std::string& cmd, const std::vector<std::string>& args)
+ {
+   interactive_run(cmd,args,true);
+diff --git a/riscv/mmu.cc b/riscv/mmu.cc
+index a394e63..e2949d2 100644
+--- a/riscv/mmu.cc
++++ b/riscv/mmu.cc
+@@ -4,8 +4,9 @@
+ #include "arith.h"
+ #include "simif.h"
+ #include "processor.h"
++#include "tag.h"
+ 
+-mmu_t::mmu_t(simif_t* sim, processor_t* proc)
++mmu_t::mmu_t(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granularity)
+  : sim(sim), proc(proc),
+ #ifdef RISCV_ENABLE_DUAL_ENDIAN
+   target_big_endian(false),
+@@ -16,11 +17,13 @@ mmu_t::mmu_t(simif_t* sim, processor_t* proc)
+   matched_trigger(NULL)
+ {
+   flush_tlb();
++  tagging_ = new tagging(sim, proc, tag_width, tag_granularity);
+   yield_load_reservation();
+ }
+ 
+ mmu_t::~mmu_t()
+ {
++  delete tagging_;
+ }
+ 
+ void mmu_t::flush_icache()
+@@ -50,6 +53,7 @@ static void throw_access_exception(bool virt, reg_t addr, access_type type)
+ 
+ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_flags)
+ {
++  //INFO("[SPIKE] MMU translate start\n");
+   if (!proc)
+     return addr;
+ 
+@@ -59,7 +63,7 @@ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_f
+   if (type != FETCH) {
+     if (!proc->state.debug_mode && get_field(proc->state.mstatus, MSTATUS_MPRV)) {
+       mode = get_field(proc->state.mstatus, MSTATUS_MPP);
+-      if (get_field(proc->state.mstatus, MSTATUS_MPV) && mode != PRV_M)
++      if (get_field(proc->state.mstatus, MSTATUS_MPV))
+         virt = true;
+     }
+     if (!proc->state.debug_mode && (xlate_flags & RISCV_XLATE_VIRT)) {
+@@ -71,9 +75,16 @@ reg_t mmu_t::translate(reg_t addr, reg_t len, access_type type, uint32_t xlate_f
+     }
+   }
+ 
+-  reg_t paddr = walk(addr, type, mode, virt, mxr) | (addr & (PGSIZE-1));
++  reg_t pte;
++  reg_t pte_level;
++  reg_t paddr = walk(addr, type, mode, virt, mxr, &pte, &pte_level) | (addr & (PGSIZE-1));
++  //INFO("storage base: %lx\n", proc->state.tag_storage_base);
++  if (proc->state.tag_storage_base)
++    tag_check(virt, addr, paddr, pte, pte_level, len, type, mode); //throws exception
++
+   if (!pmp_ok(paddr, len, type, mode))
+     throw_access_exception(virt, addr, type);
++  //INFO("[SPIKE] MMU translate end\n");
+   return paddr;
+ }
+ 
+@@ -214,6 +225,12 @@ tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_
+   return entry;
+ }
+ 
++void mmu_t::tag_check(bool virt, reg_t addr, reg_t physical_addr, reg_t pte, reg_t pte_level, reg_t len, access_type type, reg_t mode)
++{
++  tagging_->tagcheck(virt, addr, physical_addr, pte, pte_level, len, type, mode);
++  return;
++}
++
+ reg_t mmu_t::pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode)
+ {
+   if (!proc || proc->n_pmp == 0)
+@@ -374,7 +391,7 @@ reg_t mmu_t::s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_ty
+   }
+ }
+ 
+-reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr)
++reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr, reg_t* leaf_pte, reg_t * pte_level)
+ {
+   reg_t page_mask = (reg_t(1) << PGSHIFT) - 1;
+   reg_t satp = (virt) ? proc->get_state()->vsatp : proc->get_state()->satp;
+@@ -405,6 +422,7 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr)
+ 
+     reg_t pte = vm.ptesize == 4 ? from_target(*(target_endian<uint32_t>*)ppte) : from_target(*(target_endian<uint64_t>*)ppte);
+     reg_t ppn = (pte & ~reg_t(PTE_N)) >> PTE_PPN_SHIFT;
++    //INFO("WALK: ppn = %x\n", ppn);
+ 
+     if (PTE_TABLE(pte)) { // next level of page table
+       base = ppn << PGSHIFT;
+@@ -443,6 +461,8 @@ reg_t mmu_t::walk(reg_t addr, access_type type, reg_t mode, bool virt, bool mxr)
+                         | (vpn & ((reg_t(1) << napot_bits) - 1))
+                         | (vpn & ((reg_t(1) << ptshift) - 1))) << PGSHIFT;
+       reg_t phys = page_base | (addr & page_mask);
++      *leaf_pte = pte;
++      *pte_level = i;
+       return s2xlate(addr, phys, type, type, virt, mxr) & ~page_mask;
+     }
+   }
+diff --git a/riscv/mmu.h b/riscv/mmu.h
+index f009679..de3a2d8 100644
+--- a/riscv/mmu.h
++++ b/riscv/mmu.h
+@@ -13,6 +13,9 @@
+ #include "byteorder.h"
+ #include <stdlib.h>
+ #include <vector>
++#include "tag.h"
++
++//class tagging;
+ 
+ // virtual memory configuration
+ #define PGSHIFT 12
+@@ -58,7 +61,7 @@ private:
+   std::map<reg_t, reg_t> alloc_cache;
+   std::vector<std::pair<reg_t, reg_t >> addr_tbl;
+ public:
+-  mmu_t(simif_t* sim, processor_t* proc);
++  mmu_t(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granularity);
+   ~mmu_t();
+ 
+   inline reg_t misaligned_load(reg_t addr, size_t size)
+@@ -351,6 +354,8 @@ public:
+ 
+   void register_memtracer(memtracer_t*);
+ 
++  tagging* get_tagging() { return tagging_; }
++
+   int is_dirty_enabled()
+   {
+ #ifdef RISCV_ENABLE_DIRTY
+@@ -396,6 +401,7 @@ public:
+ private:
+   simif_t* sim;
+   processor_t* proc;
++  tagging* tagging_;
+   memtracer_list_t tracer;
+   reg_t load_reservation_address;
+   uint16_t fetch_temp;
+@@ -421,7 +427,7 @@ private:
+   reg_t s2xlate(reg_t gva, reg_t gpa, access_type type, access_type trap_type, bool virt, bool mxr);
+ 
+   // perform a page table walk for a given VA; set referenced/dirty bits
+-  reg_t walk(reg_t addr, access_type type, reg_t prv, bool virt, bool mxr);
++  reg_t walk(reg_t addr, access_type type, reg_t prv, bool virt, bool mxr, reg_t* pte, reg_t * pte_level);
+ 
+   // handle uncommon cases: TLB misses, page faults, MMIO
+   tlb_entry_t fetch_slow_path(reg_t addr);
+@@ -474,6 +480,7 @@ private:
+ 
+   reg_t pmp_homogeneous(reg_t addr, reg_t len);
+   reg_t pmp_ok(reg_t addr, reg_t len, access_type type, reg_t mode);
++  void tag_check(bool virt, reg_t addr, reg_t physical_addr, reg_t pte, reg_t pte_level, reg_t len, access_type type, reg_t mode);
+ 
+ #ifdef RISCV_ENABLE_DUAL_ENDIAN
+   bool target_big_endian;
+diff --git a/riscv/processor.cc b/riscv/processor.cc
+index 29e02f3..67f8233 100644
+--- a/riscv/processor.cc
++++ b/riscv/processor.cc
+@@ -23,7 +23,7 @@
+ 
+ processor_t::processor_t(const char* isa, const char* priv, const char* varch,
+                          simif_t* sim, uint32_t id, bool halt_on_reset,
+-                         FILE* log_file)
++                         FILE* log_file, size_t tag_width, size_t tag_granularity)
+   : debug(false), halt_request(HR_NONE), sim(sim), id(id), xlen(0),
+   histogram_enabled(false), log_commits_enabled(false),
+   log_file(log_file), halt_on_reset(halt_on_reset),
+@@ -36,7 +36,7 @@ processor_t::processor_t(const char* isa, const char* priv, const char* varch,
+   parse_varch_string(varch);
+ 
+   register_base_instructions();
+-  mmu = new mmu_t(sim, this);
++  mmu = new mmu_t(sim, this, tag_width, tag_granularity);
+ 
+   disassembler = new disassembler_t(max_xlen);
+   for (auto e : custom_extensions)
+@@ -341,6 +341,11 @@ void state_t::reset(reg_t max_isa)
+   vstval = 0;
+   vsatp = 0;
+ 
++  meid = 0;
++  eam = 0;
++  tag_storage_base = 0;
++  tag_dram_base = 0;
++
+   dpc = 0;
+   dscratch0 = 0;
+   dscratch1 = 0;
+@@ -644,6 +649,34 @@ void processor_t::set_virt(bool virt)
+      * set_virt() is always used in conjucter with set_privilege() and
+      * set_privilege() will flush TLB unconditionally.
+      */
++    if (state.v and !virt) {
++      /*
++       * When transitioning from virt-on (VS/VU) to virt-off (HS/M)
++       * we should mark Host extension status (i.e. FS, VS, and XS
++       * bits) as dirty when Guest/VM extension status is dirty and
++       * Host extension status is initial, clean, or dirty.
++       */
++      if ((state.vsstatus & SSTATUS_FS) &&
++          ((state.mstatus & SSTATUS_FS) == SSTATUS_FS)) {
++        state.vsstatus |= SSTATUS_FS;
++      }
++      if (supports_extension('V') &&
++          (state.vsstatus & SSTATUS_VS) &&
++          ((state.mstatus & SSTATUS_VS) == SSTATUS_VS)) {
++        state.vsstatus |= SSTATUS_VS;
++      }
++      if ((state.vsstatus & SSTATUS_XS) &&
++          ((state.mstatus & SSTATUS_XS) == SSTATUS_XS)) {
++        state.vsstatus |= SSTATUS_XS;
++      }
++      /* Update SD bit of Host */
++      state.vsstatus &= (xlen == 64 ? ~SSTATUS64_SD : ~SSTATUS32_SD);
++      if (((state.mstatus & SSTATUS_FS) == SSTATUS_FS) ||
++          ((state.vsstatus & SSTATUS_VS) == SSTATUS_VS) ||
++          ((state.vsstatus & SSTATUS_XS) == SSTATUS_XS)) {
++         state.vsstatus |= (xlen == 64 ? SSTATUS64_SD : SSTATUS32_SD);
++      }
++    }
+     mask = SSTATUS_VS_MASK;
+     mask |= (supports_extension('V') ? SSTATUS_VS : 0);
+     mask |= (xlen == 64 ? SSTATUS64_SD : SSTATUS32_SD);
+@@ -735,8 +768,7 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
+     s = set_field(s, MSTATUS_SIE, 0);
+     set_csr(CSR_MSTATUS, s);
+     s = state.hstatus;
+-    if (curr_virt)
+-      s = set_field(s, HSTATUS_SPVP, state.prv);
++    s = set_field(s, HSTATUS_SPVP, state.prv);
+     s = set_field(s, HSTATUS_SPV, curr_virt);
+     s = set_field(s, HSTATUS_GVA, t.has_gva());
+     set_csr(CSR_HSTATUS, s);
+@@ -883,6 +915,51 @@ void processor_t::set_csr(int which, reg_t val)
+ 
+   switch (which)
+   {
++    // memory tagging
++    /*
++    case CSR_U_TAG_ADDR:
++      state.tag_addr = val;
++      break;
++    case CSR_U_TAG_VALUE_L:
++      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_L);
++      break;
++    case CSR_U_TAG_VALUE_H:
++      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_H);
++      break;
++    case CSR_U_TAG_VALUE_EL:
++      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_EL);
++      break;
++    case CSR_U_TAG_VALUE_EH:
++      mmu->tagging_->store_tag(state.tag_addr, val, TAG_ACC_EH);
++      break;
++    */
++    case CSR_U_MPKEY_CONFIG:
++      state.mpk_config = val;
++      break;
++    case CSR_U_TAG_STORAGE_BASE:
++      state.tag_storage_base = val;
++      break;
++    case CSR_U_TAG_DRAM_BASE:
++      state.tag_dram_base = val;
++      break;
++    case CSR_U_TAG_MODE:
++      state.tag_mode = val;
++      break;
++    case CSR_U_MEID:
++      state.meid = val;
++      break;
++    case CSR_U_TCS:
++      state.tcs = val;
++      break;
++    case CSR_U_EAM:
++      state.eam = val;
++      break;
++    case CSR_U_EMP:
++      state.emp = val;
++      break;
++    case CSR_U_TAG_CONTROL:
++      state.tag_control = val;
++      break;
+     case CSR_MENTROPY:
+       es.set_mentropy(val);
+       break;
+@@ -973,13 +1050,20 @@ void processor_t::set_csr(int which, reg_t val)
+         (1 << CAUSE_SUPERVISOR_ECALL) |
+         (1 << CAUSE_FETCH_PAGE_FAULT) |
+         (1 << CAUSE_LOAD_PAGE_FAULT) |
++        //TODO why are tehse commented out? do they not exist?
++       /* 
++        (1 << CAUSE_MPKEY_MISMATCH_FAULT) |
++        (1 << CAUSE_ESMAP_MISMATCH_FAULT) |
++        (1 << CAUSE_MEID_MISMATCH_FAULT) |
++        (1 << CAUSE_ENC_INTEGRITY_FAULT) |
++       */ 
+         (1 << CAUSE_STORE_PAGE_FAULT);
+       mask |= supports_extension('H') ?
+         (1 << CAUSE_VIRTUAL_SUPERVISOR_ECALL) |
+         (1 << CAUSE_FETCH_GUEST_PAGE_FAULT) |
+         (1 << CAUSE_LOAD_GUEST_PAGE_FAULT) |
+         (1 << CAUSE_VIRTUAL_INSTRUCTION) |
+-        (1 << CAUSE_STORE_GUEST_PAGE_FAULT)
++        (1 << CAUSE_STORE_GUEST_PAGE_FAULT) 
+         : 0;
+       state.medeleg = (state.medeleg & ~mask) | (val & mask);
+       break;
+@@ -1039,10 +1123,20 @@ void processor_t::set_csr(int which, reg_t val)
+       if (!supports_impl(IMPL_MMU))
+         val = 0;
+ 
+-      if (state.v)
++      if (state.v){
+         state.vsatp = cal_satp(val);
+-      else
++        //TODO we probably dont need to throw trap_satp_mode_change?
++      }
++      else{
++        if(state.tag_storage_base != 0
++           && get_field(state.satp, SATP64_MODE) != SATP_MODE_OFF
++           && get_field(val,        SATP64_MODE) == SATP_MODE_OFF
++        ) {
++          //tags enabled and disabling virtual memory
++          throw trap_satp_mode_change();
++        }
+         state.satp = cal_satp(val);
++      }
+       break;
+     case CSR_SEPC:
+       if (state.v)
+@@ -1120,8 +1214,6 @@ void processor_t::set_csr(int which, reg_t val)
+     case CSR_HEDELEG: {
+       reg_t mask =
+         (1 << CAUSE_MISALIGNED_FETCH) |
+-        (1 << CAUSE_FETCH_ACCESS) |
+-        (1 << CAUSE_ILLEGAL_INSTRUCTION) |
+         (1 << CAUSE_BREAKPOINT) |
+         (1 << CAUSE_MISALIGNED_LOAD) |
+         (1 << CAUSE_LOAD_ACCESS) |
+@@ -1184,12 +1276,11 @@ void processor_t::set_csr(int which, reg_t val)
+       mask |= (supports_extension('V') ? SSTATUS_VS : 0);
+       state.vsstatus = (state.vsstatus & ~mask) | (val & mask);
+       state.vsstatus &= (xlen == 64 ? ~SSTATUS64_SD : ~SSTATUS32_SD);
+-      if (((state.vsstatus & SSTATUS_FS) == SSTATUS_FS) ||
++      if (((state.mstatus & SSTATUS_FS) == SSTATUS_FS) ||
+           ((state.vsstatus & SSTATUS_VS) == SSTATUS_VS) ||
+           ((state.vsstatus & SSTATUS_XS) == SSTATUS_XS)) {
+          state.vsstatus |= (xlen == 64 ? SSTATUS64_SD : SSTATUS32_SD);
+       }
+-      state.vsstatus = set_field(state.vsstatus, SSTATUS_UXL, xlen_to_uxl(max_xlen));
+       break;
+     }
+     case CSR_VSIE: {
+@@ -1429,6 +1520,56 @@ reg_t processor_t::get_csr(int which, insn_t insn, bool write, bool peek)
+ 
+   switch (which)
+   {
++    case CSR_U_TAG_SIZE:
++      ret((state.tag_mode == 0) ? 0 : (state.tag_mode == 1) ? 64 : 128);
++      break;
++    case CSR_U_TAG_MODE:
++      ret(state.tag_mode);
++      break;
++
++    case CSR_U_MEID:
++      ret(state.meid);
++      break;
++    case CSR_U_TCS:
++      ret(state.tcs);
++      break;
++    case CSR_U_EAM:
++      ret(state.eam);
++      break;
++    case CSR_U_EMP:
++      ret(state.emp);
++      break;
++
++    case CSR_U_MPKEY_CONFIG:
++      ret(state.mpk_config);
++
++    case CSR_U_TAG_STORAGE_BASE:
++      ret(state.tag_storage_base);
++      break;
++    case CSR_U_TAG_DRAM_BASE:
++      ret(state.tag_dram_base);
++      break;
++    case CSR_U_TAG_CONTROL:
++      ret(state.tag_control);
++      break;
++    /*
++    case CSR_U_TAG_ADDR:
++      ret(state.tag_addr);
++      break;
++    case CSR_U_TAG_VALUE_L:
++      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_L));
++      break;
++    case CSR_U_TAG_VALUE_H:
++      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_H));
++      break;
++    case CSR_U_TAG_VALUE_EL:
++      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_EL));
++      break;
++    case CSR_U_TAG_VALUE_EH:
++      ret(mmu->tagging_->load_tag(state.tag_addr, TAG_ACC_EH));
++      break;
++    */
++
+     case CSR_MENTROPY:
+       if(!supports_extension('K'))
+           break;
+diff --git a/riscv/processor.h b/riscv/processor.h
+index 51667c1..6a1ca5e 100644
+--- a/riscv/processor.h
++++ b/riscv/processor.h
+@@ -14,7 +14,6 @@
+ #include "debug_rom_defines.h"
+ #include "entropy_source.h"
+ 
+-
+ class processor_t;
+ class mmu_t;
+ typedef reg_t (*insn_func_t)(processor_t*, insn_t, reg_t);
+@@ -101,6 +100,14 @@ enum VRM{
+   INVALID_RM
+ };
+ 
++typedef enum
++{
++  TAG_ACC_L = 0,
++  TAG_ACC_H,
++  TAG_ACC_EL,
++  TAG_ACC_EH
++} mtag_access;
++
+ template<uint64_t N>
+ struct type_usew_t;
+ 
+@@ -215,6 +222,20 @@ struct state_t
+   reg_t tdata2[num_triggers];
+   bool debug_mode;
+ 
++  // address csrs for memory tagging
++  reg_t tag_addr;
++  reg_t tag_storage_base;
++  reg_t tag_dram_base;
++  reg_t tag_mode;
++  reg_t mpk_config;
++
++  reg_t meid;
++  reg_t tcs;
++  reg_t eam;
++  reg_t emp;
++
++  reg_t tag_control;
++
+   static const int max_pmp = 16;
+   uint8_t pmpcfg[max_pmp];
+   reg_t pmpaddr[max_pmp];
+@@ -275,7 +296,7 @@ class processor_t : public abstract_device_t
+ public:
+   processor_t(const char* isa, const char* priv, const char* varch,
+               simif_t* sim, uint32_t id, bool halt_on_reset,
+-              FILE *log_file);
++              FILE *log_file, size_t tag_width, size_t tag_granularity);
+   ~processor_t();
+ 
+   void set_debug(bool value);
+diff --git a/riscv/riscv.mk.in b/riscv/riscv.mk.in
+index 342ea56..563a31a 100644
+--- a/riscv/riscv.mk.in
++++ b/riscv/riscv.mk.in
+@@ -17,6 +17,7 @@ riscv_hdrs = \
+ 	disasm.h \
+ 	dts.h \
+ 	mmu.h \
++	tag.h \
+ 	processor.h \
+ 	sim.h \
+ 	simif.h \
+@@ -48,6 +49,7 @@ riscv_srcs = \
+ 	trap.cc \
+ 	cachesim.cc \
+ 	mmu.cc \
++	tag.cc \
+ 	disasm.cc \
+ 	extension.cc \
+ 	extensions.cc \
+@@ -68,6 +70,7 @@ riscv_gen_hdrs = \
+ 
+ 
+ riscv_insn_ext_i = \
++	mtrap \
+ 	add \
+ 	addi \
+ 	addiw \
+@@ -919,6 +922,7 @@ riscv_insn_priv = \
+ 	ecall \
+ 	mret \
+ 	sfence_vma \
++	fence_t \
+ 	sret \
+ 	wfi \
+ 
+@@ -930,13 +934,14 @@ riscv_insn_list = \
+ 	$(riscv_insn_ext_m) \
+ 	$(riscv_insn_ext_f) \
+ 	$(riscv_insn_ext_d) \
+-	$(riscv_insn_ext_zfh) \
+-	$(riscv_insn_ext_q) \
+-	$(riscv_insn_ext_b) \
+-    $(riscv_insn_ext_k) \
+-	$(if $(HAVE_INT128),$(riscv_insn_ext_v),) \
+-	$(riscv_insn_ext_h) \
+ 	$(riscv_insn_priv) \
++	#note: commented out insns we dont use to speed up compilation \
++	#$(if $(HAVE_INT128),$(riscv_insn_ext_v),) \
++	#$(riscv_insn_ext_zfh) \
++	#$(riscv_insn_ext_b) \
++	#$(riscv_insn_ext_h) \
++	#$(riscv_insn_ext_q) \
++	#$(riscv_insn_ext_k) \
+ 
+ riscv_gen_srcs = \
+ 	$(addsuffix .cc,$(riscv_insn_list))
+diff --git a/riscv/sim.cc b/riscv/sim.cc
+index e9e61c5..a276eb1 100644
+--- a/riscv/sim.cc
++++ b/riscv/sim.cc
+@@ -17,6 +17,9 @@
+ #include <sys/wait.h>
+ #include <sys/types.h>
+ 
++// global debug log level setting:
++size_t debug_log_level = 1; //set to 1, because we want to see fatal errors only
++
+ volatile bool ctrlc_pressed = false;
+ static void handle_signal(int sig)
+ {
+@@ -35,7 +38,8 @@ sim_t::sim_t(const char* isa, const char* priv, const char* varch,
+              std::vector<int> const hartids,
+              const debug_module_config_t &dm_config,
+              const char *log_path,
+-             bool dtb_enabled, const char *dtb_file)
++             bool dtb_enabled, const char *dtb_file,
++             size_t tag_width, size_t tag_granularity)
+   : htif_t(args),
+     mems(mems),
+     plugin_devices(plugin_devices),
+@@ -65,7 +69,7 @@ sim_t::sim_t(const char* isa, const char* priv, const char* varch,
+ 
+   debug_module.add_device(&bus);
+ 
+-  debug_mmu = new mmu_t(this, NULL);
++  debug_mmu = new mmu_t(this, NULL, tag_width, tag_granularity);
+ 
+   if (! (hartids.empty() || hartids.size() == nprocs)) {
+       std::cerr << "Number of specified hartids ("
+@@ -78,7 +82,7 @@ sim_t::sim_t(const char* isa, const char* priv, const char* varch,
+   for (size_t i = 0; i < nprocs; i++) {
+     int hart_id = hartids.empty() ? i : hartids[i];
+     procs[i] = new processor_t(isa, priv, varch, this, hart_id, halted,
+-                               log_file.get());
++                               log_file.get(), tag_width, tag_granularity);
+   }
+ 
+   make_dtb();
+diff --git a/riscv/sim.h b/riscv/sim.h
+index 1c47ce7..b4b6624 100644
+--- a/riscv/sim.h
++++ b/riscv/sim.h
+@@ -30,7 +30,8 @@ public:
+         std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices,
+         const std::vector<std::string>& args, const std::vector<int> hartids,
+         const debug_module_config_t &dm_config, const char *log_path,
+-        bool dtb_enabled, const char *dtb_file);
++        bool dtb_enabled, const char *dtb_file,
++        size_t tag_width, size_t tag_granularity);
+   ~sim_t();
+ 
+   // run the simulation to completion
+@@ -117,6 +118,7 @@ private:
+   void interactive_until(const std::string& cmd, const std::vector<std::string>& args, bool noisy);
+   void interactive_until_silent(const std::string& cmd, const std::vector<std::string>& args);
+   void interactive_until_noisy(const std::string& cmd, const std::vector<std::string>& args);
++  void interactive_debug_level(const std::string& cmd, const std::vector<std::string>& args);
+   reg_t get_reg(const std::vector<std::string>& args);
+   freg_t get_freg(const std::vector<std::string>& args);
+   reg_t get_mem(const std::vector<std::string>& args);
+diff --git a/riscv/tag.cc b/riscv/tag.cc
+new file mode 100644
+index 0000000..6209e1b
+--- /dev/null
++++ b/riscv/tag.cc
+@@ -0,0 +1,244 @@
++#include "tag.h"
++#include "decode.h"
++#include "trap.h"
++#include "common.h"
++#include "config.h"
++#include "processor.h"
++#include "mmu.h"
++#include <vector>
++
++#define SPIKE 1
++//#define printtag_debug INFO2
++//#define printtag_debug2 INFO2
++//#define printtag_debug_interrupt INFO2
++//#define printtag_debug_interrupt2 INFO2
++
++//#pragma GCC diagnostic push
++//#pragma GCC diagnostic ignored "-Wwrite-strings"
++#include "../riscv-pk/machine/tag_debug.h"
++//#pragma GCC diagnostic pop
++
++#define PTE_TO_TAG_PERMISSIONS(pte) (((pte) >> 1) & 0xf) /* previously 0x1f because g bit */
++
++tagging::tagging(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granularity)
++ : sim(sim), proc(proc)
++{
++}
++
++tagging::~tagging()
++{
++}
++
++void tagging::get_tag_from_ppn(uint64_t tag_storage_base, uint8_t mode, reg_t ppn, union memory_tag * tag_ptr_host)
++{
++    assert(tag_ptr_host);
++    //TODO DRAM_BASE is wrong if it was overwritten during startup. see make_mems in spike.cc. assert exists in spike.cc
++    uint64_t tag_size_bytes = TAGMODE_TO_TAGBYTES(mode);
++    uint64_t tag_addr = tag_storage_base + (ppn - this->proc->get_state()->tag_dram_base) * (tag_size_bytes);
++    char* host_addr = sim->addr_to_mem(tag_addr);
++    assert(host_addr);
++    //TODO maybe from_target(*(target_endian<uint64_t>*)(host_addr + 0)));
++    memset(tag_ptr_host, 0, sizeof(union memory_tag));
++
++    if (mode == MTAG32) {
++        tag_ptr_host->direct64[0] = 0;
++        tag_ptr_host->direct64[1] = 0;
++        tag_ptr_host->direct32[0] = *(uint32_t*)host_addr;
++    } else if (mode == MTAG64) {
++        tag_ptr_host->direct64[1] = 0;
++        tag_ptr_host->direct64[0] = *(uint64_t*)host_addr;
++    } else if (mode == MTAG128) {
++        tag_ptr_host->direct64[0] = *(uint64_t*)(host_addr+0);
++        tag_ptr_host->direct64[1] = *(uint64_t*)(host_addr+8);
++    } else {
++        assert(0);
++    }
++}
++
++bool tagging::get_tag(uint8_t tag_mode, reg_t physical_addr, union memory_tag * tag_ptr, union memory_tag* mp_tag)
++{
++    //ERROR("get_tag mode=%d\n", tag_mode);
++    if(tag_mode != MTAG32 && tag_mode != MTAG64 && tag_mode != MTAG128){
++        assert(tag_mode == MTAG0); //TODO adapt everything below if more modes
++        return false;
++    }
++
++/*
++    //NOTE get mem size etc
++    // size_of_tagstorage = num_physical_pages * 16
++    // tag_storage_base = PM_START + mem_size - size_of_tagstorage
++    uint64_t num_physical_pages = mem_size >> RISCV_PGSHIFT;
++    uint64_t size_of_tagstorage = num_physical_pages * tag_size_bytes;
++    uint64_t tag_storage_end = tag_storage_base + size_of_tagstorage;
++*/
++
++    reg_t ppn = physical_addr / 4096;
++    uint64_t tag_storage_base = this->proc->get_state()->tag_storage_base;
++    //INFO("Tag storage base: %lx\n", this->proc->get_state()->tag_storage_base);
++    if(!tag_storage_base){
++        //tag storage is not set-up yet.
++        assert(false); //we should not get here, because mode should be set to MTAG0 in this case
++        return false;
++    }
++    //TODO DRAM_BASE is wrong if it was overwritten during startup. see make_mems in spike.cc. assert exists in spike.cc
++    uint64_t min_ppn = this->proc->get_state()->tag_dram_base;
++    uint64_t max_ppn = (tag_storage_base / 4096) - 1; //assuming tag storage is on the upper end of the available memory
++    if (ppn < min_ppn || ppn > max_ppn){
++        //INFO("accessing memory that is not tagged. PA= %lx\n", physical_addr);
++        return false;
++    }
++
++    get_tag_from_ppn(tag_storage_base, tag_mode, ppn, tag_ptr);
++    // fetch megapage tag
++    uint64_t megapage_ppn = ppn & ~(0x1ffull);
++    get_tag_from_ppn(tag_storage_base, tag_mode, megapage_ppn, mp_tag);
++
++    return true;
++}
++
++void _printInfo(reg_t addr, reg_t physical_addr, union memory_tag * tag){
++    //INFO("pc = 0x%lx\n ", proc->get_state()->pc);
++    INFO2("VA 0x%lx PA 0x%lx. tag: 0x%8lx 0x%8lx", addr, physical_addr, tag->direct64[1], tag->direct64[0]);
++    INFO2(" [");
++    printTagGeneric(tag, INFO2);
++    INFO2("]");
++    INFO2("\n");
++}
++
++bool tagging::mpk_match(uint16_t tag_mpk, access_type type)
++{
++    if (!proc)
++        return false;
++
++    mpkey_config_t * config = (mpkey_config_t *)&proc->get_state()->mpk_config;
++
++    if (((tag_mpk == config->slot0_mpk) && ((type == STORE) ? !config->slot0_wd : true)) ||
++        ((tag_mpk == config->slot1_mpk) && ((type == STORE) ? !config->slot1_wd : true)) ||
++        ((tag_mpk == config->slot2_mpk) && ((type == STORE) ? !config->slot2_wd : true)) ||
++        ((tag_mpk == config->slot3_mpk) && ((type == STORE) ? !config->slot3_wd : true)))
++    {
++        return true;
++    }
++    
++    return false;
++}
++
++void tagging::tagcheck(bool virt, reg_t addr, reg_t physical_addr, reg_t pte, reg_t pte_level, reg_t len, access_type type, reg_t mode)
++{
++    //ERROR("tagcheck mode=%d\n", mode);
++    if (!proc)
++    {
++        return;
++    }
++    
++    reg_t prv = proc->get_state()->prv;
++    //prv = mode;
++   
++    // Machine-mode bypasses all tag checks
++    if (prv == PRV_M)
++    {
++        return;
++    }
++
++    uint8_t tag_mode = proc->get_state()->tag_mode;
++
++    union memory_tag tag;
++    union memory_tag mp_tag;
++    if (!get_tag(tag_mode, physical_addr, &tag, &mp_tag))
++    {
++        return;
++    }
++
++    assert(tag_mode == MTAG32 || tag_mode == MTAG64 || tag_mode == MTAG128);
++
++    uint64_t tag_control = proc->get_state()->tag_control;
++    //if (pte_level != 0 && mp_tag.bit.hpce)
++    //{
++        //INFO("Trying to access huge page (pte_level = %ld) containing immutable or enclave pages. (NOT IMPLEMENTED because in HW we dont have huge page TLB entries)\n", pte_level);
++        //the hardware, same as spike, also just fetches the respective 4k tag (in case the hpce bit is set for non 4k mappings)
++        //_printInfo(addr, physical_addr, &tag);
++        //_printInfo(addr, physical_addr  & ~(0x1fffffull), &mp_tag);
++        //throw trap_hpce(virt, addr, 0, 0);
++    //}
++    if (!(tag_control & TAG_CTRL_DISABLE_IMM_WRITE_CHECK) && type == STORE && tag.bit.immutable)
++    {
++        ERROR("Cannot STORE on immutable page\n");
++        _printInfo(addr, physical_addr, &tag);
++        // TODO: throw trap immutable store fault
++        throw trap_enclave_access(virt, addr, 0, 0);
++    }
++
++    uint64_t meid = proc->get_state()->meid;
++    uint64_t eam = proc->get_state()->eam;
++   
++    if (tag.bit.page_type == PT_MONITOR)
++    {
++        ERROR("Cannot access PT_MONITOR\n");
++        _printInfo(addr, physical_addr, &tag);
++        throw trap_enclave_access(virt, addr, 0, 0);
++    }
++
++    reg_t satp = (virt) ? proc->get_state()->vsatp : proc->get_state()->satp;
++    vm_info vm = decode_vm_info(proc->get_max_xlen(), false, mode, satp);
++    uint64_t vpn_mask = (1 << (vm.levels * vm.idxbits)) - 1;
++
++    //TODO make sure these checks are correct and same as the ones in cva6.
++
++    // enclave accessing non-enclave page
++    if (!(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS) && (meid != 0 && tag.bit.page_type == PT_NORMAL))
++    {
++        if (eam == EAM_NORMAL)
++        {
++            return;
++        } 
++        else
++        {
++            ERROR("Enclave tried to access non-enclave page\n");
++            throw trap_enclave_access(virt, addr, 0, 0); 
++        }
++    }
++   
++    // enclave checks 
++    if (!(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS) && (tag.bit.page_type == PT_ENCLAVE))
++    {
++        if (meid == 0)
++        {
++            ERROR("Non enclave tries to access enclave page\n");
++            throw trap_enclave_access(virt, addr, 0, 0);
++        }
++        /*
++        if (eam == EAM_NORMAL)
++        {
++            ERROR("Accessing enclave page but eam is not set\n");
++            throw trap_enclave_access(virt, addr, 0, 0);
++        }
++        */
++        if (meid != tag.bit.id)
++        {
++            ERROR("Enclave trying to access another enclave (meid mismatch)\n");
++            throw trap_enclave_access(virt, addr, 0, 0);
++        }
++
++        if (tag_mode != MTAG32) {
++            if (tag.bit.vpn != ((addr >> PGSHIFT) & vpn_mask))
++            {
++                ERROR("VPN for enclave page access doesn't match\n");
++                throw trap_enc_integrity_fault(virt, addr, 0, 0);
++            }
++            if (tag.bit.pte_perms != PTE_TO_TAG_PERMISSIONS(pte))
++            {
++                ERROR("Permission bits for enclave page don't match\n");
++                INFO("PPN: 0x%lx\n", physical_addr >> 12);
++                INFO("TAG: 0x%x  - PTE: 0x%lx\n", tag.bit.pte_perms, PTE_TO_TAG_PERMISSIONS(pte));
++                throw trap_enc_integrity_fault(virt, addr, 0, 0);
++            }
++        }
++    }
++
++    // mpk check
++    if ((tag_mode == MTAG128) && !(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS) && !mpk_match(tag.bit.mpk, type))
++    {
++        ERROR("MPKEY mismatch\n");
++        throw trap_mpkey_mismatch(virt, addr, 0, 0);
++    }
++}
+diff --git a/riscv/tag.h b/riscv/tag.h
+new file mode 100644
+index 0000000..ec19adc
+--- /dev/null
++++ b/riscv/tag.h
+@@ -0,0 +1,34 @@
++#ifndef TAG_H
++#define TAG_H
++
++#include "config.h"
++#include "processor.h"
++#include "memtracer.h"
++#include "simif.h"
++#include <vector>
++#include "../riscv-pk/machine/tag_api.h"
++
++//#define TAG_ADDR_ALIGN(addr) ((addr / tag_granularity_) * tag_granularity_)
++#define TAG_ADDR_ALIGN(addr) (addr & (~(tag_granularity_-1)))
++
++class tagging
++{
++public:
++    tagging(simif_t* sim, processor_t* proc, size_t tag_width, size_t tag_granularity);
++    ~tagging();
++
++    bool get_tag(uint8_t mode, reg_t physical_addr, union memory_tag * tag_ptr, union memory_tag* mp_tag);
++
++    bool mpk_match(uint16_t tag_mpk, access_type type);
++
++    void tagcheck(bool virt, reg_t addr, reg_t physical_addr, reg_t pte, reg_t pte_level, reg_t len, access_type type, reg_t mode);
++
++
++private:
++    void get_tag_from_ppn(uint64_t tag_storage_base, uint8_t mode, reg_t ppn, union memory_tag * tag_ptr_host);
++    processor_t* proc;
++    simif_t* sim;
++    friend class processor_t;
++};
++
++#endif
+diff --git a/riscv/trap.h b/riscv/trap.h
+index 46114ec..c546088 100644
+--- a/riscv/trap.h
++++ b/riscv/trap.h
+@@ -103,5 +103,12 @@ DECLARE_MEM_GVA_TRAP(CAUSE_FETCH_GUEST_PAGE_FAULT, instruction_guest_page_fault)
+ DECLARE_MEM_GVA_TRAP(CAUSE_LOAD_GUEST_PAGE_FAULT, load_guest_page_fault)
+ DECLARE_INST_TRAP(CAUSE_VIRTUAL_INSTRUCTION, virtual_instruction)
+ DECLARE_MEM_GVA_TRAP(CAUSE_STORE_GUEST_PAGE_FAULT, store_guest_page_fault)
++DECLARE_MEM_TRAP(CAUSE_MPKEY_MISMATCH_FAULT, mpkey_mismatch)
++DECLARE_MEM_TRAP(CAUSE_ENCLAVE_ACCESS_FAULT, enclave_access)
++DECLARE_MEM_TRAP(CAUSE_MEID_MISMATCH_FAULT, meid_mismatch)
++DECLARE_MEM_TRAP(CAUSE_HPCE_FAULT, hpce)
++DECLARE_TRAP(CAUSE_SATP_MODE_CHANGE, satp_mode_change)
++DECLARE_MEM_TRAP(CAUSE_ENC_INTEGRITY_FAULT, enc_integrity_fault)
++
+ 
+ #endif
+diff --git a/spike_main/spike-log-parser.cc b/spike_main/spike-log-parser.cc
+index d174afc..9024ebf 100644
+--- a/spike_main/spike-log-parser.cc
++++ b/spike_main/spike-log-parser.cc
+@@ -27,7 +27,7 @@ int main(int argc, char** argv)
+   parser.option(0, "isa", 1, [&](const char* s){isa = s;});
+   parser.parse(argv);
+ 
+-  processor_t p(isa, DEFAULT_PRIV, DEFAULT_VARCH, 0, 0, false, nullptr);
++  processor_t p(isa, DEFAULT_PRIV, DEFAULT_VARCH, 0, 0, false, nullptr, 0, 0);
+   if (extension) {
+     p.register_extension(extension());
+   }
+diff --git a/spike_main/spike.cc b/spike_main/spike.cc
+index 4cbe971..0247942 100644
+--- a/spike_main/spike.cc
++++ b/spike_main/spike.cc
+@@ -67,6 +67,7 @@ static void help(int exit_code = 1)
+   fprintf(stderr, "  --dm-no-abstract-csr  Debug module won't support abstract to authenticate\n");
+   fprintf(stderr, "  --dm-no-halt-groups   Debug module won't support halt groups\n");
+   fprintf(stderr, "  --dm-no-impebreak     Debug module won't support implicit ebreak in program buffer\n");
++  fprintf(stderr, "  --log-level=<level>   Defines the log level from 0 (= no output) to 10 (Very Verbose)\n");
+ 
+   exit(exit_code);
+ }
+@@ -150,6 +151,8 @@ static std::vector<std::pair<reg_t, mem_t*>> make_mems(const char* arg)
+     return std::vector<std::pair<reg_t, mem_t*>>(1, std::make_pair(reg_t(DRAM_BASE), new mem_t(size)));
+   }
+ 
++  assert(false && "not implemented. tag.cc uses DRAM_BASE instead of checking for the actual base.");
++
+   // handle base/size tuples
+   std::vector<std::pair<reg_t, mem_t*>> res;
+   while (true) {
+@@ -213,6 +216,8 @@ int main(int argc, char** argv)
+   bool dtb_enabled = true;
+   bool real_time_clint = false;
+   size_t nprocs = 1;
++  size_t tag_width = 128;
++  size_t tag_granularity = 4096;
+   const char* kernel = NULL;
+   reg_t kernel_offset, kernel_size;
+   size_t initrd_size;
+@@ -362,6 +367,12 @@ int main(int argc, char** argv)
+   parser.option(0, "log", 1,
+                 [&](const char* s){log_path = s;});
+ 
++  //parser.option(0, "log-level", 1, [&](const char* s){debug_log_level = strtoull(s, 0, 0);});
++  parser.option(0, "tag-width", 1, [&](const char* s){tag_width = atoul_nonzero_safe(s);});
++  parser.option(0, "tag-granularity", 1, [&](const char* s){tag_granularity = atoul_nonzero_safe(s);});
++
++  parser.option(0, "log-level", 1, [&](const char* s){debug_log_level = strtoull(s, 0, 0);});
++
+   auto argv1 = parser.parse(argv);
+   std::vector<std::string> htif_args(argv1, (const char*const*)argv + argc);
+   if (mems.empty())
+@@ -398,7 +409,7 @@ int main(int argc, char** argv)
+ 
+   sim_t s(isa, priv, varch, nprocs, halted, real_time_clint,
+       initrd_start, initrd_end, bootargs, start_pc, mems, plugin_devices, htif_args,
+-      std::move(hartids), dm_config, log_path, dtb_enabled, dtb_file);
++      std::move(hartids), dm_config, log_path, dtb_enabled, dtb_file, tag_width, tag_granularity);
+   std::unique_ptr<remote_bitbang_t> remote_bitbang((remote_bitbang_t *) NULL);
+   std::unique_ptr<jtag_dtm_t> jtag_dtm(
+       new jtag_dtm_t(&s.debug_module, dmi_rti));

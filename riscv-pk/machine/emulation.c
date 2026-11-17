@@ -6,6 +6,8 @@
 #include "unprivileged_memory.h"
 #include "mtrap.h"
 #include <limits.h>
+#include "tag.h"
+#include "tag_debug.h"
 
 static DECLARE_EMULATION_FUNC(emulate_rvc)
 {
@@ -126,10 +128,10 @@ void illegal_insn_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
        "  .word truly_illegal_insn - illegal_insn_trap_table\n"
        "  .word emulate_system_opcode - illegal_insn_trap_table\n"
        "  .word truly_illegal_insn - illegal_insn_trap_table\n"
-       "  .word truly_illegal_insn - illegal_insn_trap_table\n"
+       "  .word tag_trap - illegal_insn_trap_table\n"
        "  .word truly_illegal_insn - illegal_insn_trap_table\n"
        "  .popsection");
-
+   
   uintptr_t mstatus = read_csr(mstatus);
   insn_t insn = read_csr(mbadaddr);
 
@@ -144,6 +146,8 @@ void illegal_insn_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
 
   extern uint32_t illegal_insn_trap_table[];
   int32_t* pf = (void*)illegal_insn_trap_table + (insn & 0x7c);
+  //printm("[IIT] addr of illegal_insn_trap_table: %x  (+ %x)\n", illegal_insn_trap_table, (insn & 0x7c));
+  //printm("[IIT] calling illegal_insn_trap_table[%d]...\n", *pf);
   emulation_func f = (emulation_func)((void*)illegal_insn_trap_table + *pf);
   f(regs, mcause, mepc, mstatus, insn);
 }
@@ -151,6 +155,9 @@ void illegal_insn_trap(uintptr_t* regs, uintptr_t mcause, uintptr_t mepc)
 __attribute__((noinline))
 DECLARE_EMULATION_FUNC(truly_illegal_insn)
 {
+  printm("TRULY ILLEGAL\n");
+  printtag_debug("tag_trap. regs = %x. insn = %x. mcause = %lx. mepc = %lx. mstatus = %x.\n", regs, insn, mcause, mepc, mstatus);
+  printregs((sm_thread_regs_t*) regs);
   return redirect_trap(mepc, mstatus, insn);
 }
 
@@ -284,10 +291,40 @@ DECLARE_EMULATION_FUNC(emulate_system_opcode)
     case 5: new_csr_val = rs1_num; do_write = 1; break;
     case 6: new_csr_val = csr_val | rs1_num; break;
     case 7: new_csr_val = csr_val & ~rs1_num; break;
+    default: new_csr_val = 0; // why do we do this?
   }
 
   if (do_write && emulate_write_csr(csr_num, new_csr_val, mstatus))
     return truly_illegal_insn(regs, mcause, mepc, mstatus, insn);
 
   SET_RD(insn, regs, csr_val);
+}
+
+DECLARE_EMULATION_FUNC(tag_trap)
+{
+  //printtag_debug("tag_trap. regs = %x. insn = %x. mcause = %x. mepc = %x. mstatus = %x.\n",
+  //  regs, insn, mcause, mepc, mstatus);
+
+  trap_m_call(regs, insn, mcause, mepc, mstatus);
+
+  /*
+  assert(mcause == 2);
+  
+
+  if ((insn & MASK_LTAG) == MATCH_LTAG)
+  {
+      trap_ltag((sm_thread_regs_t*)regs, mcause, mepc, mstatus, insn);
+  }
+  if ((insn & MASK_STAG) == MATCH_STAG)
+  {
+      trap_stag((sm_thread_regs_t*) regs, mcause, mepc, mstatus, insn);
+  }
+  if ((insn & MASK_PPAGE) == MATCH_PPAGE)
+  {
+      trap_ppage((sm_thread_regs_t*)regs, mcause, mepc, mstatus, insn); 
+  }
+  //sm_thread_regs_t* regs_ = (sm_thread_regs_t*) regs;
+  //printtag_debug("a0 %lx a1 %lx a2 %lx a3 %lx a4 %lx a5 %lx a6 %lx a7 %lx\n", regs_->a0, regs_->a1, regs_->a2, regs_->a3, regs_->a4, regs_->a5, regs_->a6, regs_->a7);
+  */
+  //printtag_debug("tag_trap end\n");
 }

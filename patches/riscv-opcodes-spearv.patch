@@ -1,0 +1,138 @@
+diff --git a/Makefile b/Makefile
+index 64aa245..5006553 100644
+--- a/Makefile
++++ b/Makefile
+@@ -4,6 +4,7 @@ ISASIM_H := ../riscv-isa-sim/riscv/encoding.h
+ PK_H := ../riscv-pk/machine/encoding.h
+ ENV_H := ../riscv-tests/env/encoding.h
+ OPENOCD_H := ../riscv-openocd/src/target/riscv/encoding.h
++OPENOCD_H := 
+ 
+ ALL_REAL_ILEN32_OPCODES := opcodes-rv32i opcodes-rv64i opcodes-rv32m opcodes-rv64m opcodes-rv32a opcodes-rv64a opcodes-rv32h opcodes-rv64h opcodes-rv32f opcodes-rv64f opcodes-rv32d opcodes-rv64d opcodes-rv32q opcodes-rv64q opcodes-rv32b opcodes-rv64b opcodes-system opcodes-rv32zfh opcodes-rv32d-zfh opcodes-rv32q-zfh opcodes-rv64zfh opcodes-rvk opcodes-rv32k opcodes-rv64k
+ ALL_REAL_OPCODES := $(ALL_REAL_ILEN32_OPCODES) opcodes-rvc opcodes-rv32c opcodes-rv64c opcodes-custom opcodes-rvv
+@@ -40,3 +41,7 @@ priv-instr-table.tex: $(ALL_OPCODES) parse_opcodes
+ 	cat $(ALL_OPCODES) | ./parse_opcodes -privtex > $@
+ 
+ .PHONY : install
++
++.PHONY : clean
++clean:
++	rm -rf $(ISASIM_H) $(PK_H) $(ENV_H) $(OPENOCD_H) inst.go inst.rs inst.sverilog inst.chisel instr-table.tex priv-instr-table.tex
+diff --git a/encoding.h b/encoding.h
+index a8cfb9e..0eec422 100644
+--- a/encoding.h
++++ b/encoding.h
+@@ -3,6 +3,10 @@
+ #ifndef RISCV_CSR_ENCODING_H
+ #define RISCV_CSR_ENCODING_H
+ 
++//TODO
++//#define TSTATUS_EN          0x00000001
++
++
+ #define MSTATUS_UIE         0x00000001
+ #define MSTATUS_SIE         0x00000002
+ #define MSTATUS_HIE         0x00000004
+@@ -206,6 +210,12 @@
+ #define IRQ_COP      12
+ #define IRQ_HOST     13
+ 
++#define DEFAULT_RSTVEC     0x00001000
++#define CLINT_BASE         0x02000000
++#define CLINT_SIZE         0x000c0000
++#define EXT_IO_BASE        0x40000000
++#define DRAM_BASE          0x80000000
++
+ /* page table entry (PTE) fields */
+ #define PTE_V     0x001 /* Valid */
+ #define PTE_R     0x002 /* Read */
+@@ -216,7 +226,7 @@
+ #define PTE_A     0x040 /* Accessed */
+ #define PTE_D     0x080 /* Dirty */
+ #define PTE_SOFT  0x300 /* Reserved for Software */
+-#define PTE_N     0x4000000000000000 /* Zsn: NAPOT translation contiguity */
++#define PTE_N     0x4000000000000000 /* Svnapot: NAPOT translation contiguity */
+ 
+ #define PTE_PPN_SHIFT 10
+ 
+diff --git a/opcodes-custom b/opcodes-custom
+index 1df6f0f..7b6d731 100644
+--- a/opcodes-custom
++++ b/opcodes-custom
+@@ -25,3 +25,15 @@
+ @custom3.rd         rd rs1 imm12 14..12=4 6..2=0x1E 1..0=3
+ @custom3.rd.rs1     rd rs1 imm12 14..12=6 6..2=0x1E 1..0=3
+ @custom3.rd.rs1.rs2 rd rs1 imm12 14..12=7 6..2=0x1E 1..0=3
++
++# ltag/stag is similar to ld/sd.
++
++mtrap                rd rs1 imm12 14..12=0 6..2=0x1E 1..0=3
++#stag                imm12hi rs1 rs2 imm12lo 14..12=1 6..2=0x1E 1..0=3
++
++#ppage               rd rs1 imm12 14..12=6 6..2=0x1E 1..0=3
++
++rdtlb               rd rs1 imm12 14..12=3 6..2=0x1E 1..0=3
++ritlb               rd rs1 imm12 14..12=4 6..2=0x1E 1..0=3
++
++fence_t             rd imm20 6..2=0x02 1..0=3
+diff --git a/parse_opcodes b/parse_opcodes
+index 6dae82a..8d3f158 100755
+--- a/parse_opcodes
++++ b/parse_opcodes
+@@ -120,6 +120,13 @@ causes = [
+   (0x15, 'load guest page fault'),
+   (0x16, 'virtual instruction'),
+   (0x17, 'store guest page fault'),
++  (0x19, 'mpkey mismatch fault'),
++  (0x1a, 'enclave access fault'),
++  (0x1b, 'meid mismatch fault'),
++  (0x1c, 'enc integrity fault'),
++  (0x1d, 'satp mode change'),
++  (0x1e, 'st imm fault'),
++  (0x1f, 'hpce fault'),
+ ]
+ 
+ csrs = [
+@@ -140,6 +147,25 @@ csrs = [
+   (0x043, 'utval'),
+   (0x044, 'uip'),
+ 
++  # memory tagging
++  # (0x061, 'u_tag_addr'),
++  # (0x062, 'u_tag_value_l'),
++  # (0x063, 'u_tag_value_h'),
++  # (0x064, 'u_tag_value_el'),
++  # (0x065, 'u_tag_value_eh'),
++  
++  (0x066, 'u_tag_size'),
++  (0x067, 'u_tag_mode'),
++  (0x068, 'u_tag_storage_base'),
++  (0x069, 'u_mpkey_config'),
++  (0x070, 'u_eam'),
++  (0x071, 'u_meid'),
++  (0x072, 'u_tlb_size'),
++  (0x073, 'u_emp'),
++  (0x074, 'u_tcs'),
++  (0x075, 'u_tag_control'),
++  (0x076, 'u_tag_dram_base'),
++
+   # Standard User RO
+   (0xC00, 'cycle'),
+   (0xC01, 'time'),
+@@ -348,6 +374,16 @@ csrs = [
+   (0xF14, 'mhartid'),
+   (0xF15, 'mentropy'), # crypto ext
+   (0x7A9, 'mnoise'),
++
++
++  # custom
++  # see Table 2.1:  Allocation of RISC-V CSR address ranges.
++  #  S R/W non-standard: 0x5C0-0x5FF
++  #  M R/W non-standard: 0x7c0-0x7ff
++  #  U R/W non-standard: 0x800-0x8FF
++  # 
++  # TODO
++
+ ]
+ 
+ csrs32 = [
