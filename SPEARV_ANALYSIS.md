@@ -134,17 +134,167 @@ Il riferimento hardware CVA6 implementa in RTL i meccanismi che andranno replica
 
 ---
 
-## 3. Indicazioni per il Porting su gem5 (`spearv-gem5`)
+## 3. Piano di Porting su gem5
 
-Per portare SPEAR-V in gem5 (basato su memory tagging con granularità a pagine da 4 KiB):
+### 3.1 Scelta dell'Implementazione di Riferimento: RTL (`cva6`) vs Spike (`riscv-isa-sim`)
 
-1. **ISA & CSR (`src/arch/riscv/`)**:
-   - Aggiungere i CSR `0x066`–`0x076` in `regs/misc.hh` e `isa.cc` (incluso il controllo in scrittura su `satp` per generare `CAUSE_SATP_MODE_CHANGE = 29` se S-mode disabilita la paginazione con tag attivi).
-   - Decodificare `0x7b` (`mtrap` → `IllegalInstFault` per intrappolare nel Security Monitor di `riscv-pk` / OpenSBI) e `0x0b` (`fence_t` → flush microarchitettura/TLB).
-   - Aggiungere i fault code `25..31` in `faults.hh` / `fault_codes.hh` (senza delegarli in `medeleg` così da trappare sempre in M-mode).
-2. **MMU, TLB e Walker (`src/arch/riscv/tlb.cc`, `pagetable_walker.cc`, `pagetable.hh`)**:
-   - Estendere la `TlbEntry` con i bit di tag cachati (`e`/`page_type`, `imm`, `hpce`, `eid` in `asid`).
-   - Estendere la FSM del `Walker` affinché, quando `tag_mode != MTAG0`, generi letture fisiche aggiuntive verso il tag store (`tag_storage_base + (ppn - tag_dram_base) * tag_bytes`) per ciascun livello del walk (e gestisca `hpce` su superpage 2MiB/1GiB facendo il downgrade a 4KiB). In `TimingSimpleCPU`/`O3CPU` queste letture passano attraverso la porta dati del walker catturando realisticamente la latenza del tag fetch!
-   - Eseguire i controlli di isolamento (`tag_mode`, `meid`, `eam`, `immutable` su store, `PT_MONITOR` vietato fuori da M-mode) su TLB hit e walk completion.
-3. **Software / Security Monitor (`riscv-pk`)**:
-   - La patch `patches/riscv-pk-spearv.patch` fornisce il Security Monitor completo (`bbl` + `pk`) pronto per essere compilato e usato con un kernel/payload o test bare-metal/PK su gem5 (verificando eventuali adattamenti dell'indirizzo base DRAM o device tree di gem5 rispetto a `PM_START = 0x80000`).
+Per il porting di SPEAR-V su **gem5**, la scelta architetturale ottimale è **basarsi primariamente sull'implementazione hardware RTL di `cva6`**, integrandola puntualmente con le definizioni ABI e i corner case funzionali di **Spike (`riscv-isa-sim`) / `riscv-pk`** laddove il codice RTL presenta semplificazioni da prototipo FPGA o disallineamenti rispetto al Security Monitor.
+
+#### Motivazioni della scelta
+
+1. **Isomorfismo strutturale tra CVA6 e il sottosistema MMU di gem5**:
+   - **Spike** è un simulatore puramente funzionale (ISA-level): in `riscv-isa-sim/riscv/mmu.cc` e `riscv/tag.cc`, `mmu_t::translate()` invoca `tagging_->tagcheck()` **ad ogni singolo accesso in memoria**, leggendo il tag direttamente dall'array RAM dell'host (`sim->addr_to_mem(tag_addr)`) in tempo zero e senza memorizzare alcun metadato di tagging nelle entry della TLB.
+   - **gem5** (`src/arch/riscv/tlb.hh/.cc`, `pagetable.hh`, `pagetable_walker.hh/.cc`), esattamente come **CVA6** (`src/tlb.sv`, `src/ptw.sv`, `src/mmu.sv`), separa nettamente:
+     - il **Page Table Walker (`RiscvISA::Walker::WalkerState`)**, una macchina a stati finiti che emette pacchetti di lettura `PacketPtr` (`MemCmd::ReadReq`) sulla `WalkerPort` verso la gerarchia di cache/memoria;
+     - la **TLB (`RiscvISA::TLB` e `RiscvISA::TlbEntry`)**, che memorizza le traduzioni completate e applica i controlli di protezione ad ogni TLB hit.
+2. **Fedeltà del modello prestazionale e del meccanismo chiave di SPEAR-V**:
+   - Il contributo architetturale centrale di SPEAR-V (ASIA CCS '23) consiste nell'eseguire il fetch dei memory tag dal Tag Store in DRAM **esclusivamente durante il Page Table Walk (su TLB miss)** e nel cachare i bit di sicurezza (`e`, `imm`, `hpce`, `eid`, `mpk`, `pte_perms`) dentro la entry TLB, rendendo i controlli su TLB hit a costo zero.
+   - Replicare l'approccio di Spike in gem5 (leggendo il tag ad ogni `TLB::translate`) snaturerebbe il design hardware: se implementato tramite pacchetti di memoria, introdurrebbe un accesso extra in RAM per ogni load/store; se implementato tramite letture funzionali *backdoor*, falserebbe completamente le statistiche temporali (`TimingSimpleCPU`, `MinorCPU`, `O3CPU`) azzerando il costo reale dei fetch dei tag durante il PTW (1 lettura da 8B per `MTAG32`/`MTAG64`, 2 letture da 8B per `MTAG128` ad ogni livello di paginazione) e l'effetto del flag non-cacheable `TAG_CTRL_NC_PTW_IN_E`.
+3. **Meccanismi di sicurezza presenti solo nell'RTL di CVA6 (assenti o commentati in Spike)**:
+   - **Immutabilità delle Page Table durante il walk (`pt_tag_wd_q`)**: CVA6 (`src/ptw.sv`) legge il tag di ogni livello dell'albero di paginazione (a partire dalla root PT puntata da `satp.ppn`), accumulando `pt_tag_wd_q &= tag.immutable` e sollevando `ENC_INTEGRITY_FAULT` (`28`) se una foglia `PT_ENCLAVE` o `PT_MONITOR` viene raggiunta attraversando page table non immutabili. Spike (`mmu.cc` / `tag.cc`) controlla unicamente il tag della pagina fisica finale, ignorando i tag delle page table intermedie.
+   - **Gestione delle Huge Page (`HPCE` — Huge Page Containing Enclave)**: in Spike il controllo `hpce` in `tag.cc` (righe 155–162) è commentato perché `get_tag()` ricalcola sempre il tag 4KiB ad ogni accesso. In gem5 (dove `TlbEntryTrie` effettua il match sull'intera superpagina tramite `logBytes`), una megapage da 2MiB (`logBytes = 21`) inserita in TLB produrrebbe hit su tutte le 512 sottopagine da 4KiB senza più invocare il PTW. È quindi indispensabile il meccanismo RTL di `cva6/src/ptw.sv`: quando un walk al livello 2MiB (`LVL2`) rileva `tag.hpce == 1`, il PTW deve eseguire un ulteriore fetch del tag della sottopagina 4KiB (`pte.ppn | vaddr[20:12]`) e inserire nella TLB una entry degradata a 4KiB (`LVL3`, `logBytes = 12`), oltre a sollevare `HPCE_FAULT` (`31`) su eventuale hit TLB 2MiB con `hpce == 1`.
+   - **Isolamento microarchitetturale (`fence.t` e `TAG_CTRL_NC_PTW_IN_E`)**: CVA6 implementa in `src/ptw.sv` e `src/cache_subsystem/wt_dcache_ctrl.sv` il bypass della cache per le richieste del PTW quando `nc_ptw_in_e` è attivo e in `src/controller.sv` il flush microarchitetturale selettivo su `fence.t`, mentre Spike riduce `fence.t` a un semplice `MMU.flush_tlb()`.
+
+---
+
+### 3.2 Disallineamenti Critici tra CVA6 RTL, Spike e `riscv-pk` da Risolvere nel Porting
+
+L'analisi incrociata delle patch ha messo in luce **5 discrepanze** tra il codice SystemVerilog di `cva6` e il codice C del Security Monitor (`riscv-pk`) / `Spike`. Nel porting su gem5, la struttura microarchitetturale seguirà `cva6`, ma queste specifiche costanti e condizioni dovranno essere allineate a `riscv-pk`:
+
+| # | Aspetto | Implementazione `cva6` (RTL) | Implementazione `riscv-pk` / `Spike` | Scelta per gem5 |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | **Valori enum `PageType`** | `PT_NORMAL=0`, `PT_ENCLAVE=1`, `PT_MONITOR=2`, `PT_PAGETABLE=3` (`cva6/include/riscv_pkg.sv`, manca `PT_SHARED`). | `PT_NORMAL=0`, `PT_ENCLAVE=1`, `PT_MONITOR=2`, `PT_SHARED=3`, `PT_PAGETABLE=4` (`riscv-pk/machine/tag_api.h`). | **Allineare a `riscv-pk` (`PT_SHARED=3`, `PT_PAGETABLE=4`)**, poiché il Security Monitor scrive `4` nei tag delle page table in `ppage()`. |
+| **2** | **Valori e semantica di `CSR_U_EAM`** | `EAM_NORMAL=0`, `EAM_ENCLAVE=1`, `EAM_SHARED=2` (`riscv_pkg.sv`). In `mmu.sv`, se `eam == EAM_NORMAL` dentro un'enclave, gli accessi DTLB a `PT_ENCLAVE` sono bloccati. | `EAM_NORMAL=0`, `EAM_SHM=1`, `EAM_ENCLAVE=2` (`tag_api.h`). `tag.c` scrive `EAM_ENCLAVE=2`. In `tag.cc`, `EAM_NORMAL` consente all'enclave di accedere sia a `PT_NORMAL` sia alle proprie pagine `PT_ENCLAVE`. | **Adottare i valori di `tag_api.h` (`EAM_ENCLAVE=2`)**; consentire DTLB hit su `PT_ENCLAVE` (con `meid == eid`) sia con `EAM_ENCLAVE` sia con `EAM_NORMAL`, e su `PT_NORMAL` dentro enclave solo con `EAM_NORMAL` (solo per DTLB, mai per ITLB). |
+| **3** | **Protezione di `PT_MONITOR` in TLB** | `ptw.sv` comprime `PT_ENCLAVE` e `PT_MONITOR` in un unico bit `e = 1` con `eid = tag.id`. Poiché `trap_ecreate` in `tag.c` assegna alla `statuspage` (`PT_MONITOR`) lo stesso `id = e_id` dell'enclave, l'enclave in U-mode potrebbe leggerla. | `tag.cc` blocca incondizionatamente ogni accesso non-M-mode a `PT_MONITOR` (`trap_enclave_access`), indipendentemente da `meid`. | **Salvare l'intero `page_type` in `TlbEntry` di gem5**, bloccando su TLB hit qualsiasi accesso U/S a `PT_MONITOR` con `ENCLAVE_ACCESS_FAULT` (`26`). |
+| **4** | **Range PPN taggati e Self-Protection del Tag Store** | `ppn_has_tag()` in `ptw.sv` è cablato a `1'b1` (range check commentato). | `tag_tagstore.c` riserva il Tag Store in cima alla DRAM e lo **auto-protegge** scrivendo nei tag corrispondenti `.id = EID_INVALID, .immutable = 1`. In Spike (`tag.cc`), tuttavia, `max_ppn = (tag_storage_base/4096) - 1` escludeva il Tag Store stesso dai check. | **Verificare `ppn >= tag_dram_base && ppn < tag_storage_end_ppn`** (coprendo fino alla fine della DRAM / fine del Tag Store), così che la *self-protection* del Tag Store configurata da `tag_init()` sia realmente applicata dall'hardware. |
+| **5** | **Codifica `page_level` sulle `PT_PAGETABLE`** | `ptw.sv` confronta `LVL1->PL_GIGA(2)`, `LVL2->PL_MEGA(1)`, `LVL3->PL_KILO(0)` sia per `PT_ENCLAVE` sia per `PT_PAGETABLE`. | In `tag.c` (`ppage`), `depth` vale `0` per la foglia 4KiB, ma `1, 2, 3` per i 3 livelli di PT (scrivendo `page_level = 3` sulla root PT). Perciò `tag_init()` imposta di default `TAG_CTRL_DISABLE_IMM_PT_CHECKS`. | In gem5 (`level` `2=1G`, `1=2M`, `0=4K` coincide numericamente con `PL_GIGA=2, PL_MEGA=1, PL_KILO=0`), verificare `tag.page_level == level` sui PTE foglia `PT_ENCLAVE` e condizionare i check sulle PT intermedie a `!(tag_control & TAG_CTRL_DISABLE_IMM_PT_CHECKS)`. |
+
+---
+
+### 3.3 Mappatura File-per-File verso gem5 (`src/arch/riscv/`)
+
+La tabella seguente mappa ogni file modificato nei componenti SPEAR-V (`riscv-opcodes`, `cva6`, `riscv-isa-sim`) sul corrispondente file del modello RISC-V di **gem5**:
+
+| File Sorgente SPEAR-V (`cva6` / `Spike` / `opcodes`) | Ruolo in SPEAR-V | File Target in gem5 (`src/arch/riscv/`) | Modifiche da Apportare in gem5 |
+| :--- | :--- | :--- | :--- |
+| `riscv-pk/machine/tag_api.h`, `cva6/include/riscv_pkg.sv`, `cva6/include/ariane_pkg.sv` | Strutture `memory_tag` / `mtag_t`, enum `TagMode`, `PageType`, `PageLevel`, `EnclaveAccessMode`, `mpkey_config_t`, `TAG_CTRL_*`. | **`spearv.hh`** *(nuovo)* | Definizione di `BitUnion` / struct per `MemoryTag` (128 bit), enum `TagMode`, `PageType`, `PageLevel`, `EnclaveAccessMode`, flag `TagControl` e helper di calcolo indirizzo tag. |
+| `riscv-opcodes/parse_opcodes`, `cva6/include/riscv_pkg.sv`, `riscv-isa-sim/riscv/trap.h` | Cause code di eccezione custom `25..31` (`0x19`–`0x1f`). | **`fault_codes.hh`**, **`faults.hh`**, **`faults.cc`** | Aggiunta di `MPKEY_MISMATCH_FAULT = 25`, `ENCLAVE_ACCESS_FAULT = 26`, `MEID_MISMATCH_FAULT = 27`, `ENC_INTEGRITY_FAULT = 28`, `SATP_MODE_CHANGE = 29`, `ST_IMM_FAULT = 30`, `HPCE_FAULT = 31` in `ExceptionCode` (non delegabili in `DELEGABLE_EXCPS`). |
+| `riscv-opcodes/parse_opcodes`, `cva6/src/csr_regfile.sv`, `riscv-isa-sim/riscv/processor.cc` | 11 CSR custom (`0x066`–`0x076`) e trap su disattivazione `SATP` in S-mode. | **`regs/misc.hh`**, **`isa.hh`**, **`isa.cc`** | Registrazione `MISCREG_U_TAG_SIZE`..`MISCREG_U_TAG_DRAM_BASE` in `MiscRegIndex` e `CSRData`; logica read/write in `ISA::readMiscReg()` / `ISA::setMiscReg()`; controllo cambio `SATP.mode -> BARE` in `PRV_S` quando il tagging è attivo. |
+| `cva6/include/ariane_pkg.sv` (`tlb_update_tagbits_t`), `cva6/src/tlb.sv` | Estensione entry TLB con metadati del tag (`e`, `imm`, `hpce`, `pt`, `eid`, `mpk`, `pte_perms`). | **`pagetable.hh`**, **`pagetable.cc`** | Estensione di `struct TlbEntry` con i campi di sicurezza SPEAR-V e relativo supporto in `reset()`, `serialize()` e `unserialize()`. |
+| `cva6/src/tlb.sv`, `cva6/src/mmu.sv`, `riscv-isa-sim/riscv/tag.cc` | Controllo tag su ITLB/DTLB hit (isolamento enclave `meid`/`eid`, `eam`, store su `imm`, `PT_MONITOR`, `mpk`, `hpce`). | **`tlb.hh`**, **`tlb.cc`** | Implementazione di `TLB::checkSpearVPermissions()` chiamata in `TLB::doTranslate()` (e `Walker::startWalkWrapper()`) su TLB hit; gestione del matching `eid` vs `asid`. |
+| `cva6/src/ptw.sv`, `cva6/src/cache_subsystem/wt_dcache_ctrl.sv` | FSM del Page Table Walker con stati `TAG_LOOKUP` / `TAG_FINAL`, verifica immutabilità PT, VPN/permessi PTE, downgrade 2MiB→4KiB su `hpce` e flag non-cacheable `nc_ptw_in_e`. | **`pagetable_walker.hh`**, **`pagetable_walker.cc`** | Estensione di `Walker::WalkerState` per emettere letture `PacketPtr` verso il Tag Store ad ogni step del walk (sia in `Atomic`/`Functional` sia in `Timing`), validare i tag intermedi/foglia, gestire `hpce` e impostare `Request::UNCACHEABLE` se `TAG_CTRL_NC_PTW_IN_E`. |
+| `riscv-opcodes/opcodes-custom`, `cva6/src/decoder.sv`, `cva6/src/commit_stage.sv`, `cva6/src/controller.sv`, `riscv-isa-sim/riscv/insns/{mtrap,fence_t,rdtlb,ritlb}.h` | Istruzioni custom `mtrap` (`0x7b`), `fence.t` (`0x0b`), `rdtlb` (`0x307b`), `ritlb` (`0x407b`). | **`isa/decoder.isa`** | Decodifica di `fence_t` su `custom-0` (flush TLB + serializzazione pipeline), `rdtlb`/`ritlb` su `custom-3` (`funct3 = 3, 4`) e generazione `IllegalInstFault` per `mtrap` (`0x7b`, `funct3 = 0`) per intrappolare nel Security Monitor. |
+| `riscv/riscv.mk.in` | Build system. | **`SConscript`** | Registrazione di eventuali nuovi file sorgente (es. `spearv.cc` se separato) e flag di debug (`PageTableWalker`, `TLB`). |
+
+---
+
+### 3.4 Piano Operativo di Implementazione Passo-Passo
+
+#### Fase 1: Definizione Tipi Tag, CSR Custom e Codici di Eccezione
+1. **Creazione di `src/arch/riscv/spearv.hh`**:
+   - Definire la struttura `MemoryTag` a 128 bit (`uint64_t word[2]`):
+     - **Parola 0 (bit 0..63)**: `id` (`[15:0]`), `page_type` (`[18:16]`), `hpce` (`[19]`), `page_level` (`[21:20]`), `validated` (`[22]`), `immutable` (`[23]`), `vpn` (`[59:24]`, 36 bit), `pte_perms` (`[63:60]`, 4 bit `u, x, w, r` corrispondenti a `(pte >> 1) & 0xf`).
+     - **Parola 1 (bit 64..127)**: `mpk` (`[73:64]`, 10 bit), `unused` (`[127:74]`, 54 bit).
+   - Definire `MpKeyConfig` (4 slot da 11 bit in `uint64_t`: `slot0_mpk [9:0]`, `slot0_wd [10]`, ..., `slot3_mpk [41:32]`, `slot3_wd [42]`).
+   - Definire le costanti `TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS (1 << 0)`, `TAG_CTRL_DISABLE_IMM_PT_CHECKS (1 << 1)`, `TAG_CTRL_NC_PTW_IN_E (1 << 2)`, `TAG_CTRL_DISABLE_IMM_WRITE_CHECK (1 << 3)`.
+2. **Aggiunta dei CSR in `src/arch/riscv/regs/misc.hh` e `src/arch/riscv/isa.cc`**:
+   - Aggiungere in `MiscRegIndex` e nella mappa `CSRData` gli 11 CSR (`0x066`–`0x076`):
+     - `CSR_U_TAG_SIZE` (`0x066`): sola lettura, restituisce `0`, `32`, `64` o `128` in base al valore corrente di `MISCREG_U_TAG_MODE`.
+     - `CSR_U_TAG_MODE` (`0x067`): 2 bit (`MTAG0=0`, `MTAG32=1`, `MTAG64=2`, `MTAG128=3`), inizializzato a `MTAG0` al reset.
+     - `CSR_U_TAG_STORAGE_BASE` (`0x068`), `CSR_U_MPKEY_CONFIG` (`0x069`), `CSR_U_EAM` (`0x070`), `CSR_U_MEID` (`0x071`), `CSR_U_EMP` (`0x073`), `CSR_U_TCS` (`0x074`), `CSR_U_TAG_CONTROL` (`0x075`), `CSR_U_TAG_DRAM_BASE` (`0x076`).
+     - `CSR_U_TLB_SIZE` (`0x072`): sola lettura, restituisce la dimensione configurata della TLB (es. `16` o `size`).
+   - Nota sui privilegi CSR: benché gli indirizzi `0x066`–`0x076` abbiano i bit `[9:8] == 2'b00` (spazio U-mode nello standard RISC-V, scelti così dagli autori in `cva6` per prototipazione rapida), nel caso si voglia restringerne l'accesso o mantenerlo fedele a `cva6`/`Spike`, va verificato che le letture/scritture eseguite da `riscv-pk` in M-mode non vengano bloccate dal check sui permessi CSR di gem5 (in particolare per `CSR_U_TAG_SIZE` e `CSR_U_TLB_SIZE`).
+   - In `ISA::setMiscReg()`, intercettare la scrittura a `MISCREG_SATP`: se `prv == PRV_S`, `readMiscRegNoEffect(MISCREG_U_TAG_MODE) != MTAG0`, `old_satp.mode != AddrXlateMode::BARE` e `new_satp.mode == AddrXlateMode::BARE`, non aggiornare `SATP` e sollevare il fault `SATP_MODE_CHANGE` (`29`) (o segnalarlo all'istruzione `csrw satp`).
+3. **Aggiunta delle eccezioni custom in `src/arch/riscv/fault_codes.hh` e `src/arch/riscv/faults.hh/.cc`**:
+   - Aggiungere i codici `25..31` in `enum ExceptionCode`.
+   - Non inserirli in `DELEGABLE_EXCPS`: qualsiasi eccezione SPEAR-V (`25..31`) deve sempre intrappolare in M-mode (`trap_table` in `riscv-pk/machine/mentry.S`) salvando l'indirizzo virtuale faultante in `mtval` (`mbadaddr`).
+
+#### Fase 2: Estensione della TLB e Controlli su TLB Hit (`pagetable.hh`, `tlb.hh`, `tlb.cc`)
+1. **Estensione di `TlbEntry` (`src/arch/riscv/pagetable.hh`)**:
+   - Aggiungere i campi:
+     - `bool tagValid = false;`
+     - `bool e = false;` (`page_type == PT_ENCLAVE`)
+     - `bool imm = false;` (`tag.immutable`)
+     - `bool hpce = false;` (`tag.hpce`)
+     - `uint8_t pageType = 0;` (`PT_NORMAL`, `PT_ENCLAVE`, `PT_MONITOR`, `PT_SHARED`, `PT_PAGETABLE`)
+     - `uint16_t eid = 0;` (`tag.id`)
+     - `uint16_t mpk = 0;` (`tag.mpk`, 10 bit)
+     - `uint8_t tagPtePerms = 0;` (`tag.pte_perms`, 4 bit)
+2. **Gestione ASID / EID in `TLB::lookup()` e `TLB::insert()` (`src/arch/riscv/tlb.cc`)**:
+   - In `cva6/src/tlb.sv`, una entry con `e == 1` sostituisce `asid` con `eid` e fa hit quando `tags_q[i].e && tags_q[i].asid == meid_i`.
+   - In gem5, poiché `riscv-pk` impiega lo stesso spazio di indirizzamento del processo host (`assert(statuspage_pa->satp == CSRR(CSR_SATP))` in `trap_eenter`), `satp.asid` rimane invariato tra host ed enclave. Pertanto, mantenere `entry.asid = satp.asid` nella chiave `buildKey(vpn, asid)` del `TlbEntryTrie` e verificare separatamente `entry.eid == meid` in `checkSpearVPermissions()` garantisce sia l'assenza di collisioni nel trie sia il corretto isolamento tra enclave e host.
+3. **Implementazione di `TLB::checkSpearVPermissions()` (`src/arch/riscv/tlb.cc`)**:
+   - Invocare il controllo in `TLB::doTranslate()` (subito dopo `checkPermissions()` e prima dell'accesso fisico) e in `Walker::startWalkWrapper()` (prima di fare squash di un walk in coda):
+     1. Se `memaccess.priv == PRV_M` o `u_tag_mode == MTAG0` o `!entry->tagValid`, ritorna `NoFault`.
+     2. **Store su pagina immutabile (`dtlb_imm_st_err`)**: se `!(tag_control & TAG_CTRL_DISABLE_IMM_WRITE_CHECK) && mode == BaseMMU::Write && entry->imm`, ritorna `std::make_shared<AddressFault>(vaddr, ExceptionCode::ENCLAVE_ACCESS_FAULT)` (necessario affinché `enclave_access_trap` in `riscv-pk/machine/tag.c` sul vettore `26` emuli le scritture `sd`/`c.sd`/`amoswap.d` sulle page table immutabili).
+     3. **Protezione `PT_MONITOR`**: se `entry->pageType == PT_MONITOR`, ritorna `AddressFault(vaddr, ExceptionCode::ENCLAVE_ACCESS_FAULT)`.
+     4. **Controlli MPK (`MTAG128`)**: se `u_tag_mode == MTAG128 && !(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS)`, verifica che `entry->mpk` corrisponda ad almeno uno dei 4 slot `slot_i_mpk` in `u_mpkey_config` con `(mode == BaseMMU::Write ? !slot_i_wd : true)`; in caso contrario ritorna `AddressFault(vaddr, ExceptionCode::MPKEY_MISMATCH_FAULT)` (`25`).
+     5. **Isolamento Enclave (`dtlb_enclave_acc_err` / `itlb_enclave_acc_err`)**: se `!(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS)`:
+        - Sia `bool inside_enclave = (meid != 0)`.
+        - Se `mode == BaseMMU::Execute` (ITLB): l'accesso è consentito solo se `(!inside_enclave && !entry->e) || (inside_enclave && entry->e && meid == entry->eid)`; altrimenti ritorna `AddressFault(vaddr, ExceptionCode::ENCLAVE_ACCESS_FAULT)` (`26`).
+        - Se `mode != BaseMMU::Execute` (DTLB): l'accesso è consentito solo se:
+          - `!inside_enclave && !entry->e` (host accede a pagina non-enclave), oppure
+          - `inside_enclave && entry->e && meid == entry->eid && (eam == EAM_ENCLAVE || eam == EAM_NORMAL)` (enclave accede a propria pagina enclave), oppure
+          - `inside_enclave && !entry->e && eam == EAM_NORMAL` (enclave accede a memoria host con `EAM_NORMAL` attivo);
+          altrimenti ritorna `AddressFault(vaddr, ExceptionCode::ENCLAVE_ACCESS_FAULT)` (`26`).
+     6. **Controllo Huge Page (`HPCE`)**: se `entry->hpce && entry->logBytes > PageShift`, ritorna `AddressFault(vaddr, ExceptionCode::HPCE_FAULT)` (`31`).
+
+#### Fase 3: Estensione del Page Table Walker (`pagetable_walker.hh`, `pagetable_walker.cc`)
+1. **Stati e registri interni di `Walker::WalkerState`**:
+   - Aggiungere in `WalkerState` un enum per la sotto-fase di lettura tag (es. `enum TagWalkPhase { ReadRootPtTagLow, ReadRootPtTagHigh, ReadPte, ReadTargetTagLow, ReadTargetTagHigh, ReadHpce4kTagLow, ReadHpce4kTagHigh }`):
+     - All'avvio di `walkOneStage(vaddr)`: se `u_tag_mode != MTAG0` e `ppnHasTag(satp.ppn)`, il primo pacchetto `read` generato non legge subito il PTE di livello 2, ma legge i primi 8 byte del tag della root page table (`ppnToTagPaddr(satp.ppn, false)`), impostando `ptImmAccum = true` e `tagPhase = ReadRootPtTagLow` (esattamente come `tag_first_n = 1'b1; read_tag_n = 1'b1;` in `cva6/src/ptw.sv`, cfr. `patches/cva6-spearv.patch` righe 2426–2436).
+2. **Transizioni in `WalkerState::stepWalk()` (supporto `Atomic`, `Functional` e `Timing`)**:
+   - **`ReadRootPtTagLow` (e `ReadRootPtTagHigh` se `MTAG128`)**:
+     - Legge il tag della root PT (`satp.ppn`), aggiorna `ptImmAccum &= rootTag.immutable`.
+     - Se `!(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS) && rootTag.page_type == PT_PAGETABLE && rootTag.page_level != 2` (con la cautela sulla codifica `depth` di `ppage`), solleva `ENC_INTEGRITY_FAULT` (`28`).
+     - Prepara quindi il pacchetto `read` per il PTE di livello `level = 2` (`setupWalk(vaddr)`) e passa a `ReadPte`.
+   - **`ReadPte`**:
+     - Esegue i consueti controlli PMA/PMP e `checkPTEPermissions(pte, stepWalkFlags, level)`.
+     - Se il tagging è disabilitato (`u_tag_mode == MTAG0`) o `!ppnHasTag(pte.ppn)`, procede come nel PTW standard di gem5.
+     - Se il tagging è attivo: salva `savedPte = pte`, calcola l'indirizzo del tag del PPN puntato dal PTE (`ppnToTagPaddr(pte.ppn, false)`) e passa a `ReadTargetTagLow` (senza concludere ancora il walk anche se `pteIsLeaf == true`).
+   - **`ReadTargetTagLow` (e `ReadTargetTagHigh` se `MTAG128`)**:
+     - Assembla `currentTag` (64 bit in `MTAG32`/`MTAG64`, 128 bit in `MTAG128` dopo il secondo pacchetto con offset `+8`).
+     - **Caso PTE non-foglia (`!savedPte.r && !savedPte.x`)**:
+       - Aggiorna `ptImmAccum &= currentTag.immutable`.
+       - Verifica eventuale consistenza `PT_PAGETABLE`, decrementa `level--`, calcola l'indirizzo del PTE del livello successivo `(savedPte.ppn << PageShift) + (idx * sizeof(PTESv39))` e torna a `ReadPte`.
+     - **Caso PTE foglia (`savedPte.r || savedPte.x`)**:
+       - **Controllo 1 (Immutabilità Page Table)**: se `!(tag_control & TAG_CTRL_DISABLE_IMM_PT_CHECKS) && (currentTag.page_type == PT_ENCLAVE || currentTag.page_type == PT_MONITOR) && !ptImmAccum`, termina il walk e ritorna `std::make_shared<AddressFault>(entry.vaddr, ExceptionCode::ENC_INTEGRITY_FAULT)` (`28`).
+       - **Controllo 2 (VPN e Permessi PTE in `MTAG64`/`MTAG128`)**: se `!(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS) && currentTag.page_type == PT_ENCLAVE && (u_tag_mode == MTAG64 || u_tag_mode == MTAG128)`:
+         - Verifica `currentTag.vpn == getVPNFromVAddr(entry.vaddr, satp.mode)` e `currentTag.pte_perms == ((savedPte >> 1) & 0xf)`. In caso di mismatch, termina il walk e ritorna `AddressFault(entry.vaddr, ExceptionCode::ENC_INTEGRITY_FAULT)` (`28`).
+       - **Controllo 3 (Page Level Confusion)**: se `!(tag_control & TAG_CTRL_DISABLE_TAG_COMPARE_CHECKS) && currentTag.page_type == PT_ENCLAVE && currentTag.page_level != level`, termina il walk e ritorna `AddressFault(entry.vaddr, ExceptionCode::ENC_INTEGRITY_FAULT)` (`28`).
+       - **Controllo 4 (Downgrade Huge Page `HPCE`)**: se `currentTag.hpce && level == 1` (megapage 2MiB contenente pagine enclave/protette):
+         - Come in `cva6/src/ptw.sv` (cfr. `patches/cva6-spearv.patch` righe 2516–2523 e 2543–2549), degrada la traduzione a pagina 4KiB: imposta `level = 0`, aggiorna `savedPte.ppn = savedPte.ppn | bits(entry.vaddr, 20, 12)` e avvia la lettura del tag 4KiB specifico (`ReadHpce4kTagLow` / `ReadHpce4kTagHigh`), applicando poi i controlli 1–3 al tag 4KiB.
+       - **Completamento (`TAG_FINAL`)**:
+         - Popola `entry.pte = savedPte`, `entry.paddr = savedPte.ppn`, `entry.logBytes = PageShift + (level * SV39_LEVEL_BITS)` (che sarà `12` se degradato da `hpce`), `entry.tagValid = true`, `entry.e = (currentTag.page_type == PT_ENCLAVE)`, `entry.imm = currentTag.immutable`, `entry.hpce = currentTag.hpce`, `entry.pageType = currentTag.page_type`, `entry.eid = currentTag.id`, `entry.mpk = currentTag.mpk`, `entry.tagPtePerms = currentTag.pte_perms`.
+         - Esegue `TLB::checkSpearVPermissions()` prima dell'inserimento/ritorno e inserisce `entry` nella TLB (`walker->tlb->insert(vpn, entry)`).
+3. **Gestione `TAG_CTRL_NC_PTW_IN_E`**:
+   - In `WalkerState::createReqPacket(Addr paddr, MemCmd cmd, size_t bytes)`, leggere `CSR_U_TAG_CONTROL`: se il bit `TAG_CTRL_NC_PTW_IN_E` è impostato, aggiungere `Request::UNCACHEABLE` ai `Request::Flags` del pacchetto (evitando che le letture di PTE e tag durante l'esecuzione dell'enclave lascino tracce nella D-Cache).
+
+#### Fase 4: Decodifica delle Istruzioni Custom (`src/arch/riscv/isa/decoder.isa`)
+1. **`mtrap` (`.word 0x7b`, `custom-3`, `funct3 = 0`)**:
+   - Nel quadrante `0x3` (`opcode[1:0] == 2'b11`), `0x1e` (`opcode[6:2] == 5'b11110`, cioè `custom-3`), `funct3 == 0x0`: restituire `IllegalInstFault("mtrap SM call", machInst)` in modo che il trap handler M-mode in `riscv-pk/machine/emulation.c` (`illegal_insn_trap` → `tag_trap` → `trap_m_call`) riceva l'eccezione `CAUSE_ILLEGAL_INSTRUCTION` (`2`) con `mtval` valorizzato e dispacci la chiamata SM API (`ECREATE`, `EENTER`, `EEXIT`, ecc.).
+2. **`fence.t` (`.word 0x...0b`, `custom-0` = `0x0b`)**:
+   - Nel quadrante `0x3`, `0x02` (`opcode[6:2] == 5'b00010`, cioè `custom-0`):
+     - Verificare che `xc->readMiscReg(MISCREG_PRV) != PRV_U` e che non sia attivo `STATUS.tvm` in `PRV_S` (altrimenti `IllegalInstFault`).
+     - Estrarre `uint32_t imm20 = bits(machInst, 31, 12)`.
+     - Se `imm20 & (1 << 6)` (`FLUSH_TLB`) o `imm20 != 0`, invocare `xc->tcBase()->getMMUPtr()->flushAll()`.
+     - Contrassegnare l'istruzione con i flag `[IsSerializing, IsSerializeAfter, IsNonSpeculative]` per garantire il flush della pipeline in `MinorCPU` / `O3CPU`.
+3. **`rdtlb` (`0x307b`, `funct3 = 3`) e `ritlb` (`0x407b`, `funct3 = 4`) su `custom-3`**:
+   - Decodificare in `0x1e` (`custom-3`) per `funct3 == 0x3` e `funct3 == 0x4` restituendo in `Rd` i bit del tag TLB all'indice `Rs1` (o `0xDEAD` come in Spike).
+
+#### Fase 5: Piano di Verifica e Validazione
+1. **Boot e Inizializzazione Tag Store (`MTAG0` → `MTAG32`/`MTAG64`/`MTAG128`)**:
+   - Avviare gem5 in Full System con il `bbl` compilato da `riscv-pk` (che invoca `tag_init(mem_base, mem_size, MTAG0, 0)` in `memory_init()` e filtra il Device Tree tramite `filter_tagged_memory()`).
+   - Eseguire un test user-space su `pk` che invoca `api_tagreset(MTAG64)` e verificare tramite trace `--debug-flags=TLB,PageTableWalker` che:
+     - `CSR_U_TAG_STORAGE_BASE`, `CSR_U_TAG_MODE` e `CSR_U_TAG_CONTROL` vengano configurati;
+     - le pagine del Tag Store vengano auto-protette (`id = EID_INVALID, immutable = 1`);
+     - i successivi Page Table Walk in S/U-mode emettano le letture verso il Tag Store e popolino le `TlbEntry`.
+2. **Ciclo di Vita Enclave e Nesting**:
+   - Testare la sequenza completa `api_ecreate` → `api_eadd` → `api_ppage` → `api_eenter` → `api_eexit` → `api_eremove` → `api_edestroy` (incluso il nesting padre-figlio e la gestione degli interrupt timer durante l'esecuzione dell'enclave tramite `trap_vector_enclave`), sia con `AtomicSimpleCPU` sia con `TimingSimpleCPU` / `O3CPU`.
+3. **Suite di Test di Sicurezza (Verifica Eccezioni `25..31`)**:
+   - **Fault `26` (`ENCLAVE_ACCESS_FAULT`) — Emulazione PT immutabile**: proteggere una page table con `api_ppage(va, 1)` e verificare che una scrittura del kernel (`sd`/`c.sd`/`amoswap.d`) su una PTE non-enclave nella stessa page table sollevi il fault `26`, venga emulata da `enclave_access_trap` in `riscv-pk` e riprenda l'esecuzione.
+   - **Fault `26` (`ENCLAVE_ACCESS_FAULT`) — Isolamento**: verificare che un accesso dell'host a `PT_ENCLAVE`, un accesso U/S a `PT_MONITOR` (inclusa la `statuspage` dell'enclave stessa) o un accesso dell'enclave a `PT_NORMAL` con `EAM_ENCLAVE` vengano bloccati.
+   - **Fault `28` (`ENC_INTEGRITY_FAULT`)**: verificare che il remap malevolo di una pagina fisica `PT_ENCLAVE` a un VPN differente o con permessi PTE alterati venga intercettato dal PTW durante `ReadTargetTagLow`.
+   - **Fault `29` (`SATP_MODE_CHANGE`)**: verificare che `csrw satp, zero` in S-mode con tagging attivo sollevi l'eccezione `29`.
+   - **Fault `25` (`MPKEY_MISMATCH_FAULT`)**: in modalità `MTAG128`, verificare il blocco di lettura/scrittura al cambio di `CSR_U_MPKEY_CONFIG`.
+   - **Downgrade Huge Page (`HPCE`)**: con `SM_TAG_MEGAPAGES = 1`, mappare una pagina enclave dentro una megapage da 2MiB e verificare che il PTW degradi la entry TLB a 4KiB (`logBytes = 12`).
